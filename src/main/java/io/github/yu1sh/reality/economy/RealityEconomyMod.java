@@ -126,6 +126,22 @@ public final class RealityEconomyMod {
                                         .then(Commands.literal("revoke")
                                                 .then(Commands.argument("player", StringArgumentType.word())
                                                         .executes(RealityEconomyMod::revokeShopClerk)))
+                                        .then(Commands.literal("recovery")
+                                                .then(Commands.literal("status")
+                                                        .executes(RealityEconomyMod::recoveryStatus))
+                                                .then(Commands.literal("retry")
+                                                        .then(Commands.argument("purchase_id", StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "revision",
+                                                                                LongArgumentType.longArg(1L))
+                                                                        .executes(RealityEconomyMod::retryRecovery))))
+                                                .then(Commands.literal("resolve")
+                                                        .then(Commands.argument("purchase_id", StringArgumentType.word())
+                                                                .then(Commands.argument(
+                                                                                "revision",
+                                                                                LongArgumentType.longArg(1L))
+                                                                        .executes(RealityEconomyMod::resolveRecovery))))
+                                        )
                                         .then(Commands.literal("reset")
                                                 .executes(RealityEconomyMod::resetShop)))));
     }
@@ -232,6 +248,33 @@ public final class RealityEconomyMod {
     private static int resetShop(CommandContext<CommandSourceStack> context) {
         ServerPlayer player = requirePlayer(context);
         return player == null || !ShopService.reset(player) ? 0 : 1;
+    }
+
+    private static int recoveryStatus(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = requirePlayer(context);
+        return player == null || !ShopService.recoveryStatus(player) ? 0 : 1;
+    }
+
+    private static int retryRecovery(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = requirePlayer(context);
+        if (player == null) {
+            return 0;
+        }
+        return ShopService.retryRecovery(
+                player,
+                StringArgumentType.getString(context, "purchase_id"),
+                LongArgumentType.getLong(context, "revision")) ? 1 : 0;
+    }
+
+    private static int resolveRecovery(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = requirePlayer(context);
+        if (player == null) {
+            return 0;
+        }
+        return ShopService.resolveRecovery(
+                player,
+                StringArgumentType.getString(context, "purchase_id"),
+                LongArgumentType.getLong(context, "revision")) ? 1 : 0;
     }
 
     private static int showOwnBalance(CommandContext<CommandSourceStack> context) {

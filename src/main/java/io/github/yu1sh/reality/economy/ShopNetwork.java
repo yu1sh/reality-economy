@@ -17,7 +17,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 
 /** Versioned, server-produced Shop GUI request/snapshot contract. */
 public final class ShopNetwork {
-    private static final String PROTOCOL_VERSION = "1";
+    private static final String PROTOCOL_VERSION = "2";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(RealityEconomyMod.MOD_ID, "shop"),
             () -> PROTOCOL_VERSION,
@@ -258,6 +258,7 @@ public final class ShopNetwork {
         private final String selectedEntryId;
         private final EntryView selectedEntry;
         private final List<EntryView> entries;
+        private final List<RecoveryView> recoveries;
         private final String message;
 
         ShopSnapshot(
@@ -274,6 +275,7 @@ public final class ShopNetwork {
                 String selectedEntryId,
                 EntryView selectedEntry,
                 List<EntryView> entries,
+                List<RecoveryView> recoveries,
                 String message) {
             this.protocolVersion = protocolVersion;
             this.menuId = menuId;
@@ -288,6 +290,7 @@ public final class ShopNetwork {
             this.selectedEntryId = selectedEntryId;
             this.selectedEntry = selectedEntry;
             this.entries = List.copyOf(entries);
+            this.recoveries = List.copyOf(recoveries);
             this.message = message;
         }
 
@@ -339,6 +342,10 @@ public final class ShopNetwork {
             return entries;
         }
 
+        public List<RecoveryView> recoveries() {
+            return recoveries;
+        }
+
         public String message() {
             return message;
         }
@@ -362,11 +369,21 @@ public final class ShopNetwork {
             for (EntryView entry : snapshot.entries) {
                 writeEntry(entry, buffer);
             }
+            if (snapshot.recoveries.size() > ShopDomain.MAX_RECOVERY_VIEWS) {
+                throw new IllegalArgumentException("invalid Shop recovery view count");
+            }
+            buffer.writeVarInt(snapshot.recoveries.size());
+            for (RecoveryView recovery : snapshot.recoveries) {
+                writeRecovery(recovery, buffer);
+            }
             buffer.writeUtf(snapshot.message, 256);
         }
 
         private static ShopSnapshot decode(FriendlyByteBuf buffer) {
             int protocolVersion = buffer.readVarInt();
+            if (protocolVersion != ShopDomain.PROTOCOL_VERSION) {
+                throw new IllegalArgumentException("unsupported Shop snapshot protocol version");
+            }
             int menuId = buffer.readVarInt();
             String worldEpoch = buffer.readUtf(64);
             String shopId = buffer.readUtf(32);
@@ -385,6 +402,14 @@ public final class ShopNetwork {
             for (int index = 0; index < entryCount; index++) {
                 entries.add(readEntry(buffer));
             }
+            int recoveryCount = buffer.readVarInt();
+            if (recoveryCount < 0 || recoveryCount > ShopDomain.MAX_RECOVERY_VIEWS) {
+                throw new IllegalArgumentException("invalid Shop recovery view count");
+            }
+            List<RecoveryView> recoveries = new java.util.ArrayList<>();
+            for (int index = 0; index < recoveryCount; index++) {
+                recoveries.add(readRecovery(buffer));
+            }
             String message = buffer.readUtf(256);
             return new ShopSnapshot(
                     protocolVersion,
@@ -400,6 +425,7 @@ public final class ShopNetwork {
                     selectedEntry == null ? "" : selectedEntry.id(),
                     selectedEntry,
                     entries,
+                    recoveries,
                     message);
         }
 
@@ -420,6 +446,52 @@ public final class ShopNetwork {
                     buffer.readBoolean());
         }
 
+        private static void writeRecovery(RecoveryView recovery, FriendlyByteBuf buffer) {
+            buffer.writeUtf(recovery.purchaseId(), 64);
+            buffer.writeUtf(recovery.buyer(), 64);
+            buffer.writeUtf(recovery.entryId(), ShopDomain.MAX_ID_LENGTH);
+            buffer.writeUtf(recovery.itemId(), ShopDomain.MAX_ITEM_ID_LENGTH);
+            buffer.writeVarInt(recovery.quantity());
+            buffer.writeVarLong(recovery.price());
+            buffer.writeVarLong(recovery.catalogRevision());
+            buffer.writeBoolean(recovery.deliveryConfirmed());
+            buffer.writeBoolean(recovery.debitRecorded());
+            buffer.writeUtf(recovery.status(), 32);
+            buffer.writeUtf(recovery.message(), 256);
+        }
+
+        private static RecoveryView readRecovery(FriendlyByteBuf buffer) {
+            String purchaseId = buffer.readUtf(64);
+            String buyer = buffer.readUtf(64);
+            String entryId = buffer.readUtf(ShopDomain.MAX_ID_LENGTH);
+            String itemId = buffer.readUtf(ShopDomain.MAX_ITEM_ID_LENGTH);
+            int quantity = buffer.readVarInt();
+            long price = buffer.readVarLong();
+            long catalogRevision = buffer.readVarLong();
+            boolean deliveryConfirmed = buffer.readBoolean();
+            boolean debitRecorded = buffer.readBoolean();
+            String status = buffer.readUtf(32);
+            String message = buffer.readUtf(256);
+            if (purchaseId.isBlank() || buyer.isBlank() || !ShopDomain.validId(entryId, ShopDomain.MAX_ID_LENGTH)
+                    || quantity < 1 || quantity > ShopDomain.MAX_QUANTITY
+                    || price < ShopDomain.MIN_PRICE || price > ShopDomain.MAX_PRICE
+                    || catalogRevision < 1L || status.isBlank()) {
+                throw new IllegalArgumentException("invalid Shop recovery view");
+            }
+            return new RecoveryView(
+                    purchaseId,
+                    buyer,
+                    entryId,
+                    itemId,
+                    quantity,
+                    price,
+                    catalogRevision,
+                    deliveryConfirmed,
+                    debitRecorded,
+                    status,
+                    message);
+        }
+
         private static void handle(ShopSnapshot snapshot, Supplier<NetworkEvent.Context> contextSupplier) {
             NetworkEvent.Context context = contextSupplier.get();
             context.enqueueWork(() -> DistExecutor.unsafeRunWhenOn(
@@ -430,5 +502,19 @@ public final class ShopNetwork {
     }
 
     public record EntryView(String id, String itemId, int quantity, long price, boolean active) {
+    }
+
+    public record RecoveryView(
+            String purchaseId,
+            String buyer,
+            String entryId,
+            String itemId,
+            int quantity,
+            long price,
+            long catalogRevision,
+            boolean deliveryConfirmed,
+            boolean debitRecorded,
+            String status,
+            String message) {
     }
 }

@@ -129,6 +129,16 @@ public final class EconomyLedger extends SavedData {
         return shopDebits.containsKey(transactionId);
     }
 
+    synchronized DebitInspection inspectPurchaseDebit(UUID player, long amount, UUID transactionId) {
+        DebitRecord previous = shopDebits.get(transactionId);
+        if (previous == null) {
+            return DebitInspection.ABSENT;
+        }
+        return previous.player().equals(player) && previous.amount() == amount
+                ? DebitInspection.MATCHING
+                : DebitInspection.CONFLICT;
+    }
+
     synchronized String currentEpoch() {
         return currentEpoch;
     }
@@ -262,6 +272,12 @@ public final class EconomyLedger extends SavedData {
     }
 
     record DebitResult(boolean applied, boolean alreadyApplied, boolean conflict, long balance) {
+    }
+
+    enum DebitInspection {
+        ABSENT,
+        MATCHING,
+        CONFLICT
     }
 
     private record DebitRecord(UUID player, long amount) {

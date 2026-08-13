@@ -13,6 +13,8 @@ import net.minecraft.world.item.ItemStack;
 
 /** Server-side Shop application service. No GUI or client value is authoritative here. */
 final class ShopService {
+    private static final UUID SYSTEM_ACTOR = new UUID(0L, 0L);
+
     private ShopService() {
     }
 
@@ -36,8 +38,9 @@ final class ShopService {
         for (ShopDomain.CatalogEntry entry : entries) {
             player.sendSystemMessage(Component.literal(formatEntry(entry)));
         }
-        if (data.recoveryBlocked()) {
-            player.sendSystemMessage(Component.literal("shop recovery_required=true; new purchases are stopped"));
+        if (data.recoveryBlockedFor(player.getUUID())) {
+            player.sendSystemMessage(Component.literal(
+                    "shop recovery_required=true; purchases for this buyer are stopped until recovery is resolved"));
         }
         return true;
     }
@@ -125,6 +128,38 @@ final class ShopService {
     static boolean reset(ServerPlayer player) {
         ShopData data = data(player);
         Result result = reset(player, UUID.randomUUID(), data.currentRevision(), true, "command");
+        sendCommandResult(player, result);
+        return result.success();
+    }
+
+    static boolean recoveryStatus(ServerPlayer player) {
+        ShopData data = data(player);
+        if (!isAdministrator(player)) {
+            player.sendSystemMessage(Component.literal("shop recovery status requires permission level 2"));
+            return false;
+        }
+        EconomyLedger ledger = EconomyLedger.forLevel(player.serverLevel());
+        List<ShopDomain.PurchaseRecord> recoveries = data.recoveryPurchases();
+        player.sendSystemMessage(Component.literal(
+                "shop recovery epoch=" + data.currentEpoch() + " records=" + recoveries.size()));
+        for (ShopDomain.PurchaseRecord purchase : recoveries) {
+            player.sendSystemMessage(Component.literal(formatRecovery(
+                    purchase,
+                    ledger.inspectPurchaseDebit(purchase.buyer(), purchase.price(), purchase.purchaseId()))));
+        }
+        return true;
+    }
+
+    static boolean retryRecovery(ServerPlayer player, String purchaseId, long expectedRevision) {
+        Result result = retryRecovery(
+                player, UUID.randomUUID(), expectedRevision, purchaseId, "command");
+        sendCommandResult(player, result);
+        return result.success();
+    }
+
+    static boolean resolveRecovery(ServerPlayer player, String purchaseId, long expectedRevision) {
+        Result result = resolveRecovery(
+                player, UUID.randomUUID(), expectedRevision, purchaseId, "command");
         sendCommandResult(player, result);
         return result.success();
     }
@@ -226,6 +261,12 @@ final class ShopService {
                     request.revision(),
                     request.confirmation(),
                     "gui");
+            case RECOVERY_STATUS -> result = recoveryStatus(
+                    player, request.requestId(), request.revision(), "gui");
+            case RECOVERY_RETRY -> result = retryRecovery(
+                    player, request.requestId(), request.revision(), request.entryId(), "gui");
+            case RECOVERY_RESOLVE -> result = resolveRecovery(
+                    player, request.requestId(), request.revision(), request.entryId(), "gui");
             default -> result = Result.failure("unsupported Shop operation");
         }
 
@@ -411,9 +452,9 @@ final class ShopService {
             return purchaseRejected(player, data, requestId, expectedRevision, entryId,
                     "catalog revision is stale; refresh the shop", source);
         }
-        if (data.recoveryBlocked()) {
+        if (data.recoveryBlockedFor(player.getUUID())) {
             return purchaseRejected(player, data, requestId, expectedRevision, entryId,
-                    "shop recovery is required; purchase is stopped", source);
+                    "buyer recovery is required; purchase is stopped", source);
         }
         if (!ShopDomain.validId(entryId, ShopDomain.MAX_ID_LENGTH)) {
             return purchaseRejected(player, data, requestId, expectedRevision, entryId,
@@ -453,6 +494,7 @@ final class ShopService {
                 entry.price(),
                 expectedRevision,
                 ShopDomain.PurchaseStatus.PENDING,
+                false,
                 Instant.now().toEpochMilli(),
                 "journaled before item delivery");
         data.addPurchase(pending);
@@ -462,7 +504,7 @@ final class ShopService {
         boolean delivered = player.getInventory().add(delivery) && delivery.isEmpty();
         if (!delivered) {
             data.updatePurchase(purchaseId, ShopDomain.PurchaseStatus.RECOVERY_REQUIRED,
-                    "inventory delivery could not be confirmed");
+                    "inventory delivery could not be confirmed", false);
             auditPurchase(player, data, requestId, purchaseId, entry, "PURCHASE_RECOVERY_REQUIRED",
                     "item delivery could not be confirmed", source);
             remember(data, player, requestId, ShopDomain.Operation.PURCHASE, false,
@@ -472,14 +514,14 @@ final class ShopService {
         }
 
         data.updatePurchase(purchaseId, ShopDomain.PurchaseStatus.ITEM_DELIVERED,
-                "item delivery confirmed; debit pending");
+                "item delivery confirmed; debit pending", true);
         saveNow(player);
 
         EconomyLedger.DebitResult debit = ledger.debitForPurchase(
                 player.getUUID(), entry.price(), purchaseId);
         if (!debit.applied()) {
             data.updatePurchase(purchaseId, ShopDomain.PurchaseStatus.RECOVERY_REQUIRED,
-                    debit.conflict() ? "debit transaction conflict" : "debit could not be applied");
+                    debit.conflict() ? "debit transaction conflict" : "debit could not be applied", true);
             auditPurchase(player, data, requestId, purchaseId, entry, "PURCHASE_RECOVERY_REQUIRED",
                     "item delivered but debit did not commit", source);
             remember(data, player, requestId, ShopDomain.Operation.PURCHASE, false,
@@ -489,7 +531,7 @@ final class ShopService {
         }
 
         data.updatePurchase(purchaseId, ShopDomain.PurchaseStatus.COMMITTED,
-                "item delivery and debit committed");
+                "item delivery and debit committed", true);
         auditPurchase(player, data, requestId, purchaseId, entry, "PURCHASE_COMMITTED",
                 "purchase committed", source);
         remember(data, player, requestId, ShopDomain.Operation.PURCHASE, true,
@@ -497,6 +539,171 @@ final class ShopService {
         saveNow(player);
         return new Result(true, "purchase committed purchase_id=" + purchaseId
                 + " balance=" + debit.balance(), entry.id());
+    }
+
+    private static Result recoveryStatus(
+            ServerPlayer player,
+            UUID requestId,
+            long expectedRevision,
+            String source) {
+        ShopData data = data(player);
+        if (!isAdministrator(player)) {
+            return adminRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_STATUS,
+                    "permission level 2 is required", source);
+        }
+        if (!revisionMatches(data, expectedRevision)) {
+            return adminRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_STATUS,
+                    "catalog revision is stale; refresh the shop", source);
+        }
+        return Result.success("recovery status refreshed");
+    }
+
+    private static Result retryRecovery(
+            ServerPlayer player,
+            UUID requestId,
+            long expectedRevision,
+            String purchaseIdText,
+            String source) {
+        ShopData data = data(player);
+        if (!isAdministrator(player)) {
+            return adminRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RETRY,
+                    "permission level 2 is required", source);
+        }
+        if (!revisionMatches(data, expectedRevision)) {
+            return adminRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RETRY,
+                    "catalog revision is stale; refresh the shop", source);
+        }
+        UUID purchaseId = parseUuid(purchaseIdText);
+        if (purchaseId == null) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RETRY,
+                    expectedRevision, "purchase id rejected", source);
+        }
+        ShopDomain.PurchaseRecord purchase = data.purchase(purchaseId);
+        if (purchase == null) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RETRY,
+                    expectedRevision, "purchase journal record not found in current epoch", source);
+        }
+        if (purchase.status() == ShopDomain.PurchaseStatus.COMMITTED) {
+            remember(data, player, requestId, ShopDomain.Operation.RECOVERY_RETRY, true,
+                    data.currentRevision(), purchaseId, "recovery already committed");
+            saveNow(player);
+            return Result.success("recovery already committed purchase_id=" + purchaseId, purchase.entryId());
+        }
+        if (purchase.status() != ShopDomain.PurchaseStatus.RECOVERY_REQUIRED) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RETRY,
+                    expectedRevision, "purchase is not awaiting recovery", source);
+        }
+        if (!purchase.deliveryConfirmed()) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RETRY,
+                    expectedRevision, "delivery is unconfirmed; debit retry is refused", source);
+        }
+
+        EconomyLedger ledger = EconomyLedger.forLevel(player.serverLevel());
+        EconomyLedger.DebitResult debit = ledger.debitForPurchase(
+                purchase.buyer(), purchase.price(), purchase.purchaseId());
+        if (!debit.applied()) {
+            String message = debit.conflict()
+                    ? "journal debit conflict; recovery remains fail-closed"
+                    : "buyer balance is insufficient; recovery remains pending";
+            auditRecovery(player.getUUID(), data, requestId, purchase,
+                    "RECOVERY_DEBIT_RETRY_DEFERRED", message, source);
+            remember(data, player, requestId, ShopDomain.Operation.RECOVERY_RETRY, false,
+                    data.currentRevision(), purchaseId, message);
+            saveNow(player);
+            return Result.failure(message, purchase.entryId());
+        }
+
+        data.updatePurchase(purchaseId, ShopDomain.PurchaseStatus.COMMITTED,
+                "recovery debit committed using journal snapshot", true);
+        auditRecovery(player.getUUID(), data, requestId, purchase,
+                "RECOVERY_DEBIT_RETRIED", "recovery committed", source);
+        remember(data, player, requestId, ShopDomain.Operation.RECOVERY_RETRY, true,
+                data.currentRevision(), purchaseId, "recovery committed");
+        saveNow(player);
+        return Result.success("recovery committed purchase_id=" + purchaseId
+                + " balance=" + debit.balance(), purchase.entryId());
+    }
+
+    private static Result resolveRecovery(
+            ServerPlayer player,
+            UUID requestId,
+            long expectedRevision,
+            String purchaseIdText,
+            String source) {
+        ShopData data = data(player);
+        if (!isAdministrator(player)) {
+            return adminRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RESOLVE,
+                    "permission level 2 is required", source);
+        }
+        if (!revisionMatches(data, expectedRevision)) {
+            return adminRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RESOLVE,
+                    "catalog revision is stale; refresh the shop", source);
+        }
+        UUID purchaseId = parseUuid(purchaseIdText);
+        if (purchaseId == null) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RESOLVE,
+                    expectedRevision, "purchase id rejected", source);
+        }
+        ShopDomain.PurchaseRecord purchase = data.purchase(purchaseId);
+        if (purchase == null) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RESOLVE,
+                    expectedRevision, "purchase journal record not found in current epoch", source);
+        }
+        if (purchase.status() == ShopDomain.PurchaseStatus.COMMITTED) {
+            remember(data, player, requestId, ShopDomain.Operation.RECOVERY_RESOLVE, true,
+                    data.currentRevision(), purchaseId, "recovery already committed");
+            saveNow(player);
+            return Result.success("recovery already committed purchase_id=" + purchaseId, purchase.entryId());
+        }
+        if (purchase.status() != ShopDomain.PurchaseStatus.RECOVERY_REQUIRED) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RESOLVE,
+                    expectedRevision, "purchase is not awaiting recovery", source);
+        }
+        if (purchase.deliveryConfirmed()) {
+            return recoveryRejected(player, data, requestId, ShopDomain.Operation.RECOVERY_RESOLVE,
+                    expectedRevision, "delivery is confirmed; use recovery retry", source);
+        }
+
+        EconomyLedger ledger = EconomyLedger.forLevel(player.serverLevel());
+        EconomyLedger.DebitInspection debit = ledger.inspectPurchaseDebit(
+                purchase.buyer(), purchase.price(), purchase.purchaseId());
+        if (debit == EconomyLedger.DebitInspection.CONFLICT) {
+            String message = "conflicting ledger debit; recovery remains fail-closed";
+            auditRecovery(player.getUUID(), data, requestId, purchase,
+                    "RECOVERY_RESOLVE_REJECTED", message, source);
+            remember(data, player, requestId, ShopDomain.Operation.RECOVERY_RESOLVE, false,
+                    data.currentRevision(), purchaseId, message);
+            saveNow(player);
+            return Result.failure(message, purchase.entryId());
+        }
+
+        ShopDomain.PurchaseStatus finalStatus = debit == EconomyLedger.DebitInspection.MATCHING
+                ? ShopDomain.PurchaseStatus.COMMITTED
+                : ShopDomain.PurchaseStatus.FAILED;
+        String message = debit == EconomyLedger.DebitInspection.MATCHING
+                ? "admin resolved using matching journal debit; no delivery retry"
+                : "admin resolved without delivery confirmation; no debit or delivery retry";
+        data.updatePurchase(purchaseId, finalStatus, message, false);
+        auditRecovery(player.getUUID(), data, requestId, purchase,
+                "RECOVERY_RESOLVED", message, source);
+        remember(data, player, requestId, ShopDomain.Operation.RECOVERY_RESOLVE, true,
+                data.currentRevision(), purchaseId, message);
+        saveNow(player);
+        return Result.success(message + " purchase_id=" + purchaseId, purchase.entryId());
+    }
+
+    private static Result recoveryRejected(
+            ServerPlayer player,
+            ShopData data,
+            UUID requestId,
+            ShopDomain.Operation operation,
+            long expectedRevision,
+            String message,
+            String source) {
+        auditRejected(player, data, requestId, operation, expectedRevision, message, source);
+        remember(data, player, requestId, operation, false, data.currentRevision(), null, message);
+        saveNow(player);
+        return Result.failure(message);
     }
 
     private static Result appoint(ServerPlayer player, UUID requestId, String targetName, String source) {
@@ -686,6 +893,39 @@ final class ShopService {
                 source + ":" + message));
     }
 
+    private static void auditRecovery(
+            UUID actor,
+            ShopData data,
+            UUID requestId,
+            ShopDomain.PurchaseRecord purchase,
+            String action,
+            String message,
+            String source) {
+        data.appendAudit(new ShopDomain.AuditRecord(
+                UUID.randomUUID(),
+                Instant.now().toEpochMilli(),
+                data.currentEpoch(),
+                ShopDomain.SHOP_ID,
+                actor,
+                purchase.buyer(),
+                action,
+                purchase.entryId(),
+                purchase.itemId(),
+                purchase.quantity(),
+                purchase.price(),
+                true,
+                purchase.itemId(),
+                purchase.quantity(),
+                purchase.price(),
+                true,
+                data.currentRevision(),
+                data.currentRevision(),
+                requestId,
+                purchase.purchaseId(),
+                action,
+                source + ":" + message));
+    }
+
     private static void auditSimple(
             ServerPlayer player,
             ShopData data,
@@ -797,6 +1037,17 @@ final class ShopService {
         return actor.server.getPlayerList().getPlayerByName(name);
     }
 
+    private static UUID parseUuid(String value) {
+        if (value == null || value.length() > 64) {
+            return null;
+        }
+        try {
+            return UUID.fromString(value);
+        } catch (IllegalArgumentException exception) {
+            return null;
+        }
+    }
+
     private static ShopData data(ServerPlayer player) {
         ShopData data = ShopData.forLevel(player.serverLevel());
         EconomyLedger ledger = EconomyLedger.forLevel(player.serverLevel());
@@ -808,7 +1059,30 @@ final class ShopService {
         if (data.reconcile(ledger::hasPurchaseDebit)) {
             saveNow(player);
         }
+        if (reconcileRecoveries(data, ledger)) {
+            saveNow(player);
+        }
         return data;
+    }
+
+    private static boolean reconcileRecoveries(ShopData data, EconomyLedger ledger) {
+        boolean changed = false;
+        for (ShopDomain.PurchaseRecord purchase : data.recoveryPurchases()) {
+            if (!purchase.deliveryConfirmed()) {
+                continue;
+            }
+            EconomyLedger.DebitResult debit = ledger.debitForPurchase(
+                    purchase.buyer(), purchase.price(), purchase.purchaseId());
+            if (!debit.applied()) {
+                continue;
+            }
+            data.updatePurchase(purchase.purchaseId(), ShopDomain.PurchaseStatus.COMMITTED,
+                    "recovery debit committed using journal snapshot", true);
+            auditRecovery(SYSTEM_ACTOR, data, purchase.requestId(), purchase,
+                    "RECOVERY_DEBIT_RETRIED", "recovery committed during server reconciliation", "system");
+            changed = true;
+        }
+        return changed;
     }
 
     private static boolean canFit(Inventory inventory, Item item, int quantity) {
@@ -853,6 +1127,10 @@ final class ShopService {
                 selected = toView(entry);
             }
         }
+        EconomyLedger ledger = EconomyLedger.forLevel(player.serverLevel());
+        List<ShopNetwork.RecoveryView> recoveries = administrator
+                ? toRecoveryViews(data, ledger)
+                : List.of();
         ShopNetwork.sendTo(player, new ShopNetwork.ShopSnapshot(
                 ShopDomain.PROTOCOL_VERSION,
                 menuId,
@@ -861,12 +1139,13 @@ final class ShopService {
                 data.currentRevision(),
                 clerk,
                 administrator,
-                data.recoveryBlocked(),
+                data.recoveryBlockedFor(player.getUUID()),
                 page,
                 allEntries.size(),
                 selected == null ? "" : selected.id(),
                 selected,
                 entries,
+                recoveries,
                 message == null ? "" : message));
     }
 
@@ -889,6 +1168,44 @@ final class ShopService {
                 + " quantity=" + entry.quantity()
                 + " price=" + entry.price()
                 + " active=" + entry.active();
+    }
+
+    private static List<ShopNetwork.RecoveryView> toRecoveryViews(ShopData data, EconomyLedger ledger) {
+        List<ShopNetwork.RecoveryView> views = new ArrayList<>();
+        List<ShopDomain.PurchaseRecord> recoveries = data.recoveryPurchases();
+        int limit = Math.min(recoveries.size(), ShopDomain.MAX_RECOVERY_VIEWS);
+        for (int index = 0; index < limit; index++) {
+            ShopDomain.PurchaseRecord purchase = recoveries.get(index);
+            views.add(new ShopNetwork.RecoveryView(
+                    purchase.purchaseId().toString(),
+                    purchase.buyer().toString(),
+                    purchase.entryId(),
+                    purchase.itemId(),
+                    purchase.quantity(),
+                    purchase.price(),
+                    purchase.catalogRevision(),
+                    purchase.deliveryConfirmed(),
+                    ledger.inspectPurchaseDebit(purchase.buyer(), purchase.price(), purchase.purchaseId())
+                            == EconomyLedger.DebitInspection.MATCHING,
+                    purchase.status().name(),
+                    purchase.message()));
+        }
+        return views;
+    }
+
+    private static String formatRecovery(
+            ShopDomain.PurchaseRecord purchase,
+            EconomyLedger.DebitInspection debit) {
+        return "purchase_id=" + purchase.purchaseId()
+                + " buyer=" + purchase.buyer()
+                + " entry=" + purchase.entryId()
+                + " item=" + purchase.itemId()
+                + " quantity=" + purchase.quantity()
+                + " price=" + purchase.price()
+                + " status=" + purchase.status()
+                + " delivery_confirmed=" + purchase.deliveryConfirmed()
+                + " debit=" + debit
+                + " message=" + purchase.message();
     }
 
     private record Result(boolean success, String message, String selectedEntryId) {

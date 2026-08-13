@@ -6,7 +6,7 @@ import java.util.UUID;
 /** Minecraft-independent Shop v1 state and contract values. */
 public final class ShopDomain {
     public static final String SHOP_ID = "default";
-    public static final int PROTOCOL_VERSION = 1;
+    public static final int PROTOCOL_VERSION = 2;
     public static final int ACTIVE_ENTRY_LIMIT = 16;
     public static final int RETAINED_ENTRY_LIMIT = 256;
     public static final int MAX_QUANTITY = 64;
@@ -16,6 +16,7 @@ public final class ShopDomain {
     public static final int MAX_ID_LENGTH = 64;
     public static final int MAX_ITEM_ID_LENGTH = 128;
     public static final int MAX_PLAYER_NAME_LENGTH = 64;
+    public static final int MAX_RECOVERY_VIEWS = 64;
 
     private static final String BREAD_ENTRY = "bundle_a_food_bread";
     private static final String TORCH_ENTRY = "bundle_a_light_torch";
@@ -63,7 +64,10 @@ public final class ShopDomain {
         RESUME(6),
         APPOINT(7),
         REVOKE(8),
-        RESET(9);
+        RESET(9),
+        RECOVERY_STATUS(10),
+        RECOVERY_RETRY(11),
+        RECOVERY_RESOLVE(12);
 
         private final int code;
 
@@ -115,6 +119,7 @@ public final class ShopDomain {
             long price,
             long catalogRevision,
             PurchaseStatus status,
+            boolean deliveryConfirmed,
             long timestamp,
             String message) {
     }

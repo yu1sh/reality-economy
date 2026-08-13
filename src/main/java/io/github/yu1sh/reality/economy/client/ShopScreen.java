@@ -41,6 +41,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
     private EditBox quantityBox;
     private EditBox priceBox;
     private EditBox playerBox;
+    private EditBox purchaseBox;
 
     public ShopScreen(ShopMenu menu, Inventory inventory, Component title) {
         super(menu, inventory, title);
@@ -70,6 +71,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
         quantityBox = null;
         priceBox = null;
         playerBox = null;
+        purchaseBox = null;
 
         int left = leftPos;
         int top = topPos;
@@ -261,6 +263,36 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
                 })
                 .bounds(left + 325, top + 150, 70, 20)
                 .build());
+        purchaseBox = addRenderableWidget(new EditBox(
+                font, left + 170, top + 184, 250, 20, Component.literal("purchase id from server snapshot")));
+        purchaseBox.setMaxLength(64);
+        addRenderableWidget(Button.builder(Component.literal("Refresh recovery"), button -> {
+                    send(ShopDomain.Operation.RECOVERY_STATUS, "", "", 0, 0L, "", false, snapshot.page());
+                })
+                .bounds(left + 10, top + 184, 145, 20)
+                .build());
+        addRenderableWidget(Button.builder(Component.literal("Retry debit"), button -> {
+                    send(ShopDomain.Operation.RECOVERY_RETRY,
+                            purchaseBox.getValue(), "", 0, 0L, "", false, snapshot.page());
+                })
+                .bounds(left + 170, top + 220, 110, 20)
+                .build());
+        addRenderableWidget(Button.builder(Component.literal("Resolve uncertain"), button -> {
+                    send(ShopDomain.Operation.RECOVERY_RESOLVE,
+                            purchaseBox.getValue(), "", 0, 0L, "", false, snapshot.page());
+                })
+                .bounds(left + 285, top + 220, 135, 20)
+                .build());
+        int selectionLimit = Math.min(3, snapshot.recoveries().size());
+        for (int index = 0; index < selectionLimit; index++) {
+            ShopNetwork.RecoveryView recovery = snapshot.recoveries().get(index);
+            int row = index;
+            addRenderableWidget(Button.builder(
+                            Component.literal("Use " + truncate(recovery.purchaseId(), 10)),
+                            button -> purchaseBox.setValue(recovery.purchaseId()))
+                    .bounds(left + 10 + (index % 2) * 80, top + 250 + (index / 2) * 22, 75, 20)
+                    .build());
+        }
     }
 
     private void buildResetWidgets(int left, int top) {
@@ -336,7 +368,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
             graphics.drawString(font, truncate(localMessage, 72), 10, GUI_HEIGHT - 70, 0xFFAA00);
         }
         if (snapshot.recoveryBlocked()) {
-            graphics.drawString(font, "RECOVERY REQUIRED: purchases stopped", 10, 42, 0xFF5555);
+            graphics.drawString(font, "RECOVERY REQUIRED: this buyer is stopped", 10, 42, 0xFF5555);
         }
 
         if (mode == Mode.LIST) {
@@ -362,6 +394,23 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
         } else if (mode == Mode.ADMIN) {
             graphics.drawString(font, "Administrator controls", 20, 52, 0xFFFFFF);
             graphics.drawString(font, "target must be another online player", 60, 64, 0xB0B0B0);
+            graphics.drawString(font, "Recovery records (server snapshot): " + snapshot.recoveries().size(), 20, 174, 0xFFFFFF);
+            int recoveryIndex = 0;
+            for (ShopNetwork.RecoveryView recovery : snapshot.recoveries()) {
+                if (recoveryIndex >= 3) {
+                    break;
+                }
+                graphics.drawString(
+                        font,
+                        truncate(recovery.purchaseId(), 10)
+                                + " " + recovery.status()
+                                + " delivery=" + recovery.deliveryConfirmed()
+                                + " debit=" + recovery.debitRecorded(),
+                        20,
+                        188 + recoveryIndex * 18,
+                        recovery.deliveryConfirmed() ? 0xFFFF55 : 0xFFAA55);
+                recoveryIndex++;
+            }
         } else if (mode == Mode.RESET) {
             graphics.drawString(font, "Reset starts a new epoch, empty ledger, and seeded catalog.", 20, 72, 0xFFFF55);
             graphics.drawString(font, "Old purchases and audit records are retained.", 20, 90, 0xFFFFFF);

@@ -42,6 +42,7 @@ final class ShopData extends SavedData {
     private static final String BUYER_TAG = "buyer";
     private static final String CATALOG_REVISION_TAG = "catalog_revision";
     private static final String STATUS_TAG = "status";
+    private static final String DELIVERY_CONFIRMED_TAG = "delivery_confirmed";
     private static final String TIMESTAMP_TAG = "timestamp";
     private static final String MESSAGE_TAG = "message";
     private static final String AUDIT_ID_TAG = "audit_id";
@@ -108,7 +109,10 @@ final class ShopData extends SavedData {
                     ShopDomain.PurchaseRecord purchase = withPurchaseStatus(
                             entry.getValue(),
                             ShopDomain.PurchaseStatus.RECOVERY_REQUIRED,
-                            "recovery required after restart");
+                            status == ShopDomain.PurchaseStatus.ITEM_DELIVERED
+                                    ? "delivery confirmed before restart; debit recovery required"
+                                    : "delivery unconfirmed after restart",
+                            status == ShopDomain.PurchaseStatus.ITEM_DELIVERED);
                     namespace.purchases.put(entry.getKey(), purchase);
                     namespace.audits.add(new ShopDomain.AuditRecord(
                             UUID.randomUUID(),
@@ -219,6 +223,10 @@ final class ShopData extends SavedData {
         return null;
     }
 
+    synchronized ShopDomain.PurchaseRecord purchase(UUID purchaseId) {
+        return currentNamespace().purchases.get(purchaseId);
+    }
+
     synchronized List<ShopDomain.PurchaseRecord> unresolvedPurchases() {
         List<ShopDomain.PurchaseRecord> unresolved = new ArrayList<>();
         for (ShopDomain.PurchaseRecord purchase : currentNamespace().purchases.values()) {
@@ -231,8 +239,24 @@ final class ShopData extends SavedData {
         return unresolved;
     }
 
-    synchronized boolean recoveryBlocked() {
-        return !unresolvedPurchases().isEmpty();
+    synchronized List<ShopDomain.PurchaseRecord> recoveryPurchases() {
+        List<ShopDomain.PurchaseRecord> recoveries = new ArrayList<>();
+        for (ShopDomain.PurchaseRecord purchase : currentNamespace().purchases.values()) {
+            if (purchase.status() == ShopDomain.PurchaseStatus.RECOVERY_REQUIRED) {
+                recoveries.add(purchase);
+            }
+        }
+        recoveries.sort(Comparator.comparing(purchase -> purchase.purchaseId().toString()));
+        return recoveries;
+    }
+
+    synchronized boolean recoveryBlockedFor(UUID buyer) {
+        for (ShopDomain.PurchaseRecord purchase : unresolvedPurchases()) {
+            if (purchase.buyer().equals(buyer)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     synchronized boolean reconcile(Predicate<UUID> debitExists) {
@@ -245,12 +269,48 @@ final class ShopData extends SavedData {
                 continue;
             }
 
-            ShopDomain.PurchaseStatus status = debitExists.test(purchase.purchaseId())
-                    ? ShopDomain.PurchaseStatus.COMMITTED
-                    : ShopDomain.PurchaseStatus.RECOVERY_REQUIRED;
-            entry.setValue(withPurchaseStatus(purchase, status, status == ShopDomain.PurchaseStatus.COMMITTED
-                    ? "reconciled after restart"
-                    : "recovery required after restart"));
+            ShopDomain.PurchaseStatus status;
+            boolean deliveryConfirmed;
+            String message;
+            if (purchase.status() == ShopDomain.PurchaseStatus.PENDING) {
+                status = ShopDomain.PurchaseStatus.RECOVERY_REQUIRED;
+                deliveryConfirmed = false;
+                message = debitExists.test(purchase.purchaseId())
+                        ? "debit exists but delivery is unconfirmed after restart"
+                        : "delivery unconfirmed after restart";
+            } else if (debitExists.test(purchase.purchaseId())) {
+                status = ShopDomain.PurchaseStatus.COMMITTED;
+                deliveryConfirmed = true;
+                message = "reconciled after restart";
+            } else {
+                status = ShopDomain.PurchaseStatus.RECOVERY_REQUIRED;
+                deliveryConfirmed = true;
+                message = "delivery confirmed but debit recovery is required";
+            }
+            entry.setValue(withPurchaseStatus(purchase, status, message, deliveryConfirmed));
+            namespace.audits.add(new ShopDomain.AuditRecord(
+                    UUID.randomUUID(),
+                    System.currentTimeMillis(),
+                    namespace.epoch,
+                    ShopDomain.SHOP_ID,
+                    SYSTEM_ACTOR,
+                    purchase.buyer(),
+                    "RECOVERY_RECONCILED",
+                    purchase.entryId(),
+                    purchase.itemId(),
+                    purchase.quantity(),
+                    purchase.price(),
+                    true,
+                    purchase.itemId(),
+                    purchase.quantity(),
+                    purchase.price(),
+                    true,
+                    namespace.revision,
+                    namespace.revision,
+                    purchase.requestId(),
+                    purchase.purchaseId(),
+                    status.name(),
+                    message));
             changed = true;
         }
         if (changed) {
@@ -272,7 +332,19 @@ final class ShopData extends SavedData {
         if (current == null) {
             return null;
         }
-        ShopDomain.PurchaseRecord updated = withPurchaseStatus(current, status, message);
+        return updatePurchase(purchaseId, status, message, current.deliveryConfirmed());
+    }
+
+    synchronized ShopDomain.PurchaseRecord updatePurchase(
+            UUID purchaseId,
+            ShopDomain.PurchaseStatus status,
+            String message,
+            boolean deliveryConfirmed) {
+        ShopDomain.PurchaseRecord current = currentNamespace().purchases.get(purchaseId);
+        if (current == null) {
+            return null;
+        }
+        ShopDomain.PurchaseRecord updated = withPurchaseStatus(current, status, message, deliveryConfirmed);
         currentNamespace().purchases.put(purchaseId, updated);
         setDirty();
         return updated;
@@ -484,7 +556,8 @@ final class ShopData extends SavedData {
     private static ShopDomain.PurchaseRecord withPurchaseStatus(
             ShopDomain.PurchaseRecord purchase,
             ShopDomain.PurchaseStatus status,
-            String message) {
+            String message,
+            boolean deliveryConfirmed) {
         return new ShopDomain.PurchaseRecord(
                 purchase.purchaseId(),
                 purchase.requestId(),
@@ -497,6 +570,7 @@ final class ShopData extends SavedData {
                 purchase.price(),
                 purchase.catalogRevision(),
                 status,
+                deliveryConfirmed,
                 purchase.timestamp(),
                 message);
     }
@@ -715,6 +789,7 @@ final class ShopData extends SavedData {
         tag.putLong(PRICE_TAG, purchase.price());
         tag.putLong(CATALOG_REVISION_TAG, purchase.catalogRevision());
         tag.putString(STATUS_TAG, purchase.status().name());
+        tag.putBoolean(DELIVERY_CONFIRMED_TAG, purchase.deliveryConfirmed());
         tag.putLong(TIMESTAMP_TAG, purchase.timestamp());
         tag.putString(MESSAGE_TAG, purchase.message());
         return tag;
@@ -745,6 +820,9 @@ final class ShopData extends SavedData {
                 || price > ShopDomain.MAX_PRICE || revision < 1L) {
             return null;
         }
+        boolean deliveryConfirmed = tag.getBoolean(DELIVERY_CONFIRMED_TAG)
+                || status == ShopDomain.PurchaseStatus.ITEM_DELIVERED
+                || legacyDeliveryConfirmed(status, message);
         return new ShopDomain.PurchaseRecord(
                 purchaseId,
                 requestId,
@@ -757,8 +835,15 @@ final class ShopData extends SavedData {
                 price,
                 revision,
                 status,
+                deliveryConfirmed,
                 tag.getLong(TIMESTAMP_TAG),
                 message);
+    }
+
+    private static boolean legacyDeliveryConfirmed(ShopDomain.PurchaseStatus status, String message) {
+        return status == ShopDomain.PurchaseStatus.RECOVERY_REQUIRED
+                && ("debit transaction conflict".equals(message)
+                        || "debit could not be applied".equals(message));
     }
 
     private static CompoundTag writeRequest(ShopDomain.RequestRecord request) {
