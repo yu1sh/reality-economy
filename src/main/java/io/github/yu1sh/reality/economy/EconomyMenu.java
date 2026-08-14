@@ -1,6 +1,7 @@
 package io.github.yu1sh.reality.economy;
 
-import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.Set;
 import java.util.UUID;
 import net.minecraft.world.entity.player.Inventory;
@@ -13,7 +14,7 @@ import net.minecraft.world.item.ItemStack;
 public final class EconomyMenu extends AbstractContainerMenu {
     private static final int MAX_REQUEST_IDENTITIES = 256;
     private final UUID ownerId;
-    private final Set<UUID> requestIds = new HashSet<>();
+    private final Set<UUID> requestIds = new LinkedHashSet<>();
     private EconomyNetwork.EconomySnapshot snapshot;
 
     public EconomyMenu(MenuType<?> menuType, int containerId, Inventory inventory) {
@@ -36,10 +37,16 @@ public final class EconomyMenu extends AbstractContainerMenu {
     }
 
     synchronized boolean claimRequest(UUID requestId) {
-        if (requestId == null || requestIds.contains(requestId) || requestIds.size() >= MAX_REQUEST_IDENTITIES) {
+        if (requestId == null || requestIds.contains(requestId)) {
             return false;
         }
-        return requestIds.add(requestId);
+        requestIds.add(requestId);
+        if (requestIds.size() > MAX_REQUEST_IDENTITIES) {
+            Iterator<UUID> oldest = requestIds.iterator();
+            oldest.next();
+            oldest.remove();
+        }
+        return true;
     }
 
     public EconomyNetwork.EconomySnapshot snapshot() {
