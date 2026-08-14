@@ -15,6 +15,7 @@ import net.minecraft.world.level.saveddata.SavedData;
 /** A persistent balance ledger shared by every dimension of one server world. */
 public final class EconomyLedger extends SavedData {
     static final String DATA_NAME = "reality_economy_ledger";
+    private static final String WORLD_KEY_TAG = "world_key";
     private static final String CURRENT_EPOCH_TAG = "current_epoch";
     private static final String ARCHIVED_EPOCHS_TAG = "archived_epochs";
     private static final String EPOCH_TAG = "epoch";
@@ -27,23 +28,33 @@ public final class EconomyLedger extends SavedData {
 
     private final Map<UUID, Long> balances = new HashMap<>();
     private final Map<UUID, DebitRecord> shopDebits = new HashMap<>();
+    private final Map<String, QuestRewardContract.JournalRecord> questRewards = new HashMap<>();
+    private final List<QuestRewardContract.ConflictRecord> questRewardConflicts = new ArrayList<>();
     private final Map<String, LedgerArchive> archivedEpochs = new HashMap<>();
+    private String worldKey = "";
     private String currentEpoch = "";
 
     private EconomyLedger() {
     }
 
     static EconomyLedger create() {
-        return new EconomyLedger();
+        EconomyLedger ledger = new EconomyLedger();
+        ledger.worldKey = UUID.randomUUID().toString();
+        return ledger;
     }
 
     static EconomyLedger load(CompoundTag tag) {
         EconomyLedger ledger = new EconomyLedger();
+        if (tag.contains(WORLD_KEY_TAG, Tag.TAG_STRING)) {
+            ledger.worldKey = tag.getString(WORLD_KEY_TAG);
+        }
         if (tag.contains(CURRENT_EPOCH_TAG, Tag.TAG_STRING)) {
             ledger.currentEpoch = tag.getString(CURRENT_EPOCH_TAG);
         }
         readBalances(tag, ledger.balances);
         readDebits(tag, ledger.shopDebits);
+        readQuestRewards(tag, ledger.questRewards);
+        readQuestRewardConflicts(tag, ledger.questRewardConflicts);
 
         ListTag archiveTags = tag.getList(ARCHIVED_EPOCHS_TAG, Tag.TAG_COMPOUND);
         for (int index = 0; index < archiveTags.size(); index++) {
@@ -57,19 +68,30 @@ public final class EconomyLedger extends SavedData {
             }
             Map<UUID, Long> archivedBalances = new HashMap<>();
             Map<UUID, DebitRecord> archivedDebits = new HashMap<>();
+            Map<String, QuestRewardContract.JournalRecord> archivedRewards = new HashMap<>();
+            List<QuestRewardContract.ConflictRecord> archivedConflicts = new ArrayList<>();
             readBalances(archiveTag, archivedBalances);
             readDebits(archiveTag, archivedDebits);
-            ledger.archivedEpochs.put(epoch, new LedgerArchive(archivedBalances, archivedDebits));
+            readQuestRewards(archiveTag, archivedRewards);
+            readQuestRewardConflicts(archiveTag, archivedConflicts);
+            ledger.archivedEpochs.put(
+                    epoch,
+                    new LedgerArchive(archivedBalances, archivedDebits, archivedRewards, archivedConflicts));
         }
         return ledger;
     }
 
     /** Uses the overworld storage so every dimension in this world shares one ledger. */
     static EconomyLedger forLevel(ServerLevel level) {
-        return level.getServer().overworld().getDataStorage().computeIfAbsent(
+        EconomyLedger ledger = level.getServer().overworld().getDataStorage().computeIfAbsent(
                 EconomyLedger::load,
                 EconomyLedger::create,
                 DATA_NAME);
+        if (ledger.worldKey.isBlank()) {
+            ledger.worldKey = UUID.randomUUID().toString();
+            ledger.setDirty();
+        }
+        return ledger;
     }
 
     synchronized long balanceOf(UUID player) {
@@ -139,6 +161,96 @@ public final class EconomyLedger extends SavedData {
                 : DebitInspection.CONFLICT;
     }
 
+    synchronized String worldKey() {
+        return worldKey;
+    }
+
+    synchronized QuestRewardContract.JournalRecord findQuestReward(QuestRewardContract.Key key) {
+        if (key == null) {
+            return null;
+        }
+        QuestRewardContract.JournalRecord current = questRewards.get(key.canonical());
+        if (current != null) {
+            return current;
+        }
+        for (LedgerArchive archive : archivedEpochs.values()) {
+            QuestRewardContract.JournalRecord archived = archive.rewards().get(key.canonical());
+            if (archived != null) {
+                return archived;
+            }
+        }
+        return null;
+    }
+
+    synchronized void prepareQuestReward(QuestRewardContract.JournalRecord record) {
+        questRewards.put(record.intent().key().canonical(), record);
+        setDirty();
+    }
+
+    synchronized void rejectQuestReward(QuestRewardContract.JournalRecord record) {
+        questRewards.put(record.intent().key().canonical(), record);
+        setDirty();
+    }
+
+    synchronized void markQuestRewardRejected(QuestRewardContract.Key key, String reason) {
+        QuestRewardContract.JournalRecord previous = questRewards.get(key.canonical());
+        if (previous == null) {
+            return;
+        }
+        questRewards.put(
+                key.canonical(),
+                new QuestRewardContract.JournalRecord(
+                        previous.intent(),
+                        QuestRewardContract.JournalStatus.REJECTED,
+                        null,
+                        balanceOf(previous.intent().targetPlayer()),
+                        System.currentTimeMillis(),
+                        reason));
+        setDirty();
+    }
+
+    synchronized QuestRewardCredit applyPreparedQuestReward(QuestRewardContract.Key key) {
+        QuestRewardContract.JournalRecord record = questRewards.get(key.canonical());
+        if (record == null || record.status() != QuestRewardContract.JournalStatus.PENDING) {
+            long balance = record == null ? 0L : record.balance();
+            return new QuestRewardCredit(false, null, balance, "reward is not pending");
+        }
+        long amount = record.intent().rewardAmount();
+        long current = balanceOf(record.intent().targetPlayer());
+        if (amount <= 0L || amount > Long.MAX_VALUE - current) {
+            return new QuestRewardCredit(false, null, current, "ledger balance would overflow");
+        }
+        UUID transactionId = UUID.randomUUID();
+        long updatedBalance = current + amount;
+        putBalance(record.intent().targetPlayer(), updatedBalance);
+        questRewards.put(
+                key.canonical(),
+                new QuestRewardContract.JournalRecord(
+                        record.intent(),
+                        QuestRewardContract.JournalStatus.APPLIED,
+                        transactionId,
+                        updatedBalance,
+                        System.currentTimeMillis(),
+                        "ledger credit and reward journal committed"));
+        setDirty();
+        return new QuestRewardCredit(true, transactionId, updatedBalance, "");
+    }
+
+    synchronized List<QuestRewardContract.JournalRecord> pendingQuestRewards() {
+        List<QuestRewardContract.JournalRecord> pending = new ArrayList<>();
+        for (QuestRewardContract.JournalRecord record : questRewards.values()) {
+            if (record.status() == QuestRewardContract.JournalStatus.PENDING) {
+                pending.add(record);
+            }
+        }
+        return pending;
+    }
+
+    synchronized void recordQuestRewardConflict(QuestRewardContract.ConflictRecord conflict) {
+        questRewardConflicts.add(conflict);
+        setDirty();
+    }
+
     synchronized String currentEpoch() {
         return currentEpoch;
     }
@@ -163,10 +275,16 @@ public final class EconomyLedger extends SavedData {
         if (!currentEpoch.isBlank()) {
             archivedEpochs.put(
                     currentEpoch,
-                    new LedgerArchive(new HashMap<>(balances), new HashMap<>(shopDebits)));
+                    new LedgerArchive(
+                            new HashMap<>(balances),
+                            new HashMap<>(shopDebits),
+                            new HashMap<>(questRewards),
+                            new ArrayList<>(questRewardConflicts)));
         }
         balances.clear();
         shopDebits.clear();
+        questRewards.clear();
+        questRewardConflicts.clear();
         currentEpoch = epoch;
         setDirty();
     }
@@ -181,9 +299,12 @@ public final class EconomyLedger extends SavedData {
 
     @Override
     public synchronized CompoundTag save(CompoundTag tag) {
+        tag.putString(WORLD_KEY_TAG, worldKey);
         tag.putString(CURRENT_EPOCH_TAG, currentEpoch);
         writeBalances(tag, balances);
         writeDebits(tag, shopDebits);
+        writeQuestRewards(tag, questRewards.values());
+        writeQuestRewardConflicts(tag, questRewardConflicts);
 
         ListTag archiveTags = new ListTag();
         List<Map.Entry<String, LedgerArchive>> archives = new ArrayList<>(archivedEpochs.entrySet());
@@ -193,6 +314,8 @@ public final class EconomyLedger extends SavedData {
             archiveTag.putString(EPOCH_TAG, archive.getKey());
             writeBalances(archiveTag, archive.getValue().balances());
             writeDebits(archiveTag, archive.getValue().debits());
+            writeQuestRewards(archiveTag, archive.getValue().rewards().values());
+            writeQuestRewardConflicts(archiveTag, archive.getValue().conflicts());
             archiveTags.add(archiveTag);
         }
         tag.put(ARCHIVED_EPOCHS_TAG, archiveTags);
@@ -241,6 +364,32 @@ public final class EconomyLedger extends SavedData {
         }
     }
 
+    private static void readQuestRewards(
+            CompoundTag tag,
+            Map<String, QuestRewardContract.JournalRecord> destination) {
+        ListTag rewardTags = tag.getList(QuestRewardJournal.REWARDS_TAG, Tag.TAG_COMPOUND);
+        for (int index = 0; index < rewardTags.size(); index++) {
+            QuestRewardContract.JournalRecord record = QuestRewardJournal.readRecord(
+                    rewardTags.getCompound(index));
+            if (record != null) {
+                destination.put(record.intent().key().canonical(), record);
+            }
+        }
+    }
+
+    private static void readQuestRewardConflicts(
+            CompoundTag tag,
+            List<QuestRewardContract.ConflictRecord> destination) {
+        ListTag conflictTags = tag.getList(QuestRewardJournal.CONFLICTS_TAG, Tag.TAG_COMPOUND);
+        for (int index = 0; index < conflictTags.size(); index++) {
+            QuestRewardContract.ConflictRecord conflict = QuestRewardJournal.readConflict(
+                    conflictTags.getCompound(index));
+            if (conflict != null) {
+                destination.add(conflict);
+            }
+        }
+    }
+
     private static void writeBalances(CompoundTag tag, Map<UUID, Long> source) {
         ListTag balanceTags = new ListTag();
         List<Map.Entry<UUID, Long>> entries = new ArrayList<>(source.entrySet());
@@ -268,10 +417,35 @@ public final class EconomyLedger extends SavedData {
         tag.put(DEBITS_TAG, debitTags);
     }
 
+    private static void writeQuestRewards(
+            CompoundTag tag,
+            java.util.Collection<QuestRewardContract.JournalRecord> source) {
+        ListTag rewardTags = new ListTag();
+        List<QuestRewardContract.JournalRecord> records = new ArrayList<>(source);
+        records.sort(Comparator.comparing(record -> record.intent().key().canonical()));
+        for (QuestRewardContract.JournalRecord record : records) {
+            rewardTags.add(QuestRewardJournal.writeRecord(record));
+        }
+        tag.put(QuestRewardJournal.REWARDS_TAG, rewardTags);
+    }
+
+    private static void writeQuestRewardConflicts(
+            CompoundTag tag,
+            List<QuestRewardContract.ConflictRecord> source) {
+        ListTag conflictTags = new ListTag();
+        for (QuestRewardContract.ConflictRecord conflict : source) {
+            conflictTags.add(QuestRewardJournal.writeConflict(conflict));
+        }
+        tag.put(QuestRewardJournal.CONFLICTS_TAG, conflictTags);
+    }
+
     record MutationResult(boolean applied, long balance) {
     }
 
     record DebitResult(boolean applied, boolean alreadyApplied, boolean conflict, long balance) {
+    }
+
+    record QuestRewardCredit(boolean applied, UUID transactionId, long balance, String reason) {
     }
 
     enum DebitInspection {
@@ -283,6 +457,10 @@ public final class EconomyLedger extends SavedData {
     private record DebitRecord(UUID player, long amount) {
     }
 
-    private record LedgerArchive(Map<UUID, Long> balances, Map<UUID, DebitRecord> debits) {
+    private record LedgerArchive(
+            Map<UUID, Long> balances,
+            Map<UUID, DebitRecord> debits,
+            Map<String, QuestRewardContract.JournalRecord> rewards,
+            List<QuestRewardContract.ConflictRecord> conflicts) {
     }
 }

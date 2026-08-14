@@ -7,22 +7,31 @@ import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import java.time.Instant;
 import java.util.UUID;
+import java.util.function.BiFunction;
+import java.util.function.Function;
 import net.minecraft.commands.arguments.ResourceLocationArgument;
 import net.minecraft.core.Registry;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.commands.Commands;
 import net.minecraft.network.FriendlyByteBuf;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.inventory.MenuType;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
+import net.minecraftforge.event.level.LevelEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.common.extensions.IForgeMenuType;
+import net.minecraftforge.fml.InterModComms;
 import net.minecraftforge.fml.common.Mod;
+import net.minecraftforge.fml.event.lifecycle.InterModEnqueueEvent;
+import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
+import net.minecraft.world.level.Level;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -37,6 +46,26 @@ public final class RealityEconomyMod {
         Registry.register(BuiltInRegistries.MENU, new ResourceLocation(MOD_ID, "shop"), SHOP_MENU);
         ShopNetwork.register();
         MinecraftForge.EVENT_BUS.register(this);
+        FMLJavaModLoadingContext.get().getModEventBus().addListener(this::enqueueQuestRewardEndpoints);
+    }
+
+    private void enqueueQuestRewardEndpoints(InterModEnqueueEvent event) {
+        InterModComms.sendTo(
+                QuestRewardContract.PRODUCER_MOD_ID,
+                QuestRewardContract.IMC_RECEIVE_METHOD,
+                () -> (BiFunction<ServerLevel, CompoundTag, CompoundTag>) QuestRewardReceiver::receive);
+        InterModComms.sendTo(
+                QuestRewardContract.PRODUCER_MOD_ID,
+                QuestRewardContract.IMC_SCOPE_METHOD,
+                () -> (Function<ServerLevel, CompoundTag>) QuestRewardReceiver::currentScope);
+    }
+
+    @SubscribeEvent
+    public void recoverQuestRewards(LevelEvent.Load event) {
+        if (event.getLevel() instanceof ServerLevel level
+                && Level.OVERWORLD.equals(level.dimension())) {
+            QuestRewardReceiver.recover(level);
+        }
     }
 
     private static ShopMenu createShopMenu(int windowId, Inventory inventory, FriendlyByteBuf buffer) {
