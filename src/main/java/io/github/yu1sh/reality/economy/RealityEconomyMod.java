@@ -5,8 +5,6 @@ import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.arguments.LongArgumentType;
 import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
-import java.time.Instant;
-import java.util.UUID;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import net.minecraft.commands.arguments.ResourceLocationArgument;
@@ -32,19 +30,19 @@ import net.minecraftforge.fml.common.Mod;
 import net.minecraftforge.fml.event.lifecycle.InterModEnqueueEvent;
 import net.minecraftforge.fml.javafmlmod.FMLJavaModLoadingContext;
 import net.minecraft.world.level.Level;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
 
 @Mod(RealityEconomyMod.MOD_ID)
 public final class RealityEconomyMod {
     public static final String MOD_ID = "reality_economy";
     public static final String SHOP_ID = ShopDomain.SHOP_ID;
     public static final MenuType<ShopMenu> SHOP_MENU = IForgeMenuType.create(RealityEconomyMod::createShopMenu);
-    private static final Logger LOGGER = LoggerFactory.getLogger(MOD_ID);
+    public static final MenuType<EconomyMenu> ECONOMY_MENU = IForgeMenuType.create(RealityEconomyMod::createEconomyMenu);
 
     public RealityEconomyMod() {
         Registry.register(BuiltInRegistries.MENU, new ResourceLocation(MOD_ID, "shop"), SHOP_MENU);
+        Registry.register(BuiltInRegistries.MENU, new ResourceLocation(MOD_ID, "economy"), ECONOMY_MENU);
         ShopNetwork.register();
+        EconomyNetwork.register();
         MinecraftForge.EVENT_BUS.register(this);
         FMLJavaModLoadingContext.get().getModEventBus().addListener(this::enqueueQuestRewardEndpoints);
     }
@@ -72,13 +70,19 @@ public final class RealityEconomyMod {
         return new ShopMenu(SHOP_MENU, windowId, inventory);
     }
 
+    private static EconomyMenu createEconomyMenu(int windowId, Inventory inventory, FriendlyByteBuf buffer) {
+        return new EconomyMenu(ECONOMY_MENU, windowId, inventory);
+    }
+
     @SubscribeEvent
     public void registerCommands(RegisterCommandsEvent event) {
         CommandDispatcher<CommandSourceStack> dispatcher = event.getDispatcher();
         dispatcher.register(
                 Commands.literal("realityeconomy")
                         .then(Commands.literal("balance")
-                                .executes(RealityEconomyMod::showOwnBalance))
+                                .executes(RealityEconomyMod::showOwnBalance)
+                                .then(Commands.literal("gui")
+                                        .executes(RealityEconomyMod::openEconomy)))
                         .then(Commands.literal("admin")
                                 .requires(source -> source.hasPermission(2))
                                 .then(Commands.literal("grant")
@@ -311,9 +315,15 @@ public final class RealityEconomyMod {
         if (player == null) {
             return 0;
         }
+        return EconomyService.showOwnBalance(player) ? 1 : 0;
+    }
 
-        long balance = EconomyLedger.forLevel(player.serverLevel()).balanceOf(player.getUUID());
-        player.sendSystemMessage(Component.literal("balance=" + balance));
+    private static int openEconomy(CommandContext<CommandSourceStack> context) {
+        ServerPlayer player = requirePlayer(context);
+        if (player == null) {
+            return 0;
+        }
+        EconomyService.openEconomy(player);
         return 1;
     }
 
@@ -323,40 +333,19 @@ public final class RealityEconomyMod {
             return 0;
         }
 
-        ServerPlayer target = findOnlinePlayer(context);
-        if (target == null) {
-            return 0;
-        }
-
         long amount = LongArgumentType.getLong(context, "amount");
         String reason = StringArgumentType.getString(context, "reason");
-        EconomyLedger ledger = EconomyLedger.forLevel(actor.serverLevel());
-        EconomyLedger.MutationResult result = grant
-                ? ledger.grant(target.getUUID(), amount)
-                : ledger.revoke(target.getUUID(), amount);
-        if (!result.applied()) {
-            String failure = grant
-                    ? "grant rejected: balance would exceed the maximum"
-                    : "revoke rejected: balance would become negative";
-            context.getSource().sendFailure(Component.literal(failure));
+        EconomyService.Result result = EconomyService.mutate(
+                actor,
+                grant,
+                StringArgumentType.getString(context, "player"),
+                amount,
+                reason);
+        if (!result.success()) {
+            context.getSource().sendFailure(Component.literal(result.message()));
             return 0;
         }
-
-        UUID transactionId = UUID.randomUUID();
-        long delta = grant ? amount : -amount;
-        audit(
-                grant ? "grant" : "revoke",
-                transactionId,
-                actor,
-                target,
-                delta,
-                reason);
-        actor.sendSystemMessage(Component.literal(
-                (grant ? "granted" : "revoked")
-                        + " amount=" + amount
-                        + " player=" + target.getGameProfile().getName()
-                        + " balance=" + result.balance()
-                        + " transaction_id=" + transactionId));
+        actor.sendSystemMessage(Component.literal(result.message()));
         return 1;
     }
 
@@ -366,18 +355,14 @@ public final class RealityEconomyMod {
             return 0;
         }
 
-        ServerPlayer target = findOnlinePlayer(context);
-        if (target == null) {
+        EconomyService.Result result = EconomyService.inspect(
+                actor,
+                StringArgumentType.getString(context, "player"));
+        if (!result.success()) {
+            context.getSource().sendFailure(Component.literal(result.message()));
             return 0;
         }
-
-        long balance = EconomyLedger.forLevel(actor.serverLevel()).balanceOf(target.getUUID());
-        UUID transactionId = UUID.randomUUID();
-        audit("inspect", transactionId, actor, target, 0L, "inspect");
-        actor.sendSystemMessage(Component.literal(
-                "player=" + target.getGameProfile().getName()
-                        + " balance=" + balance
-                        + " transaction_id=" + transactionId));
+        actor.sendSystemMessage(Component.literal(result.message()));
         return 1;
     }
 
@@ -389,30 +374,4 @@ public final class RealityEconomyMod {
         return null;
     }
 
-    private static ServerPlayer findOnlinePlayer(CommandContext<CommandSourceStack> context) {
-        String name = StringArgumentType.getString(context, "player");
-        ServerPlayer target = context.getSource().getServer().getPlayerList().getPlayerByName(name);
-        if (target == null) {
-            context.getSource().sendFailure(Component.literal("online player not found: " + name));
-        }
-        return target;
-    }
-
-    private static void audit(
-            String action,
-            UUID transactionId,
-            ServerPlayer actor,
-            ServerPlayer target,
-            long delta,
-            String reason) {
-        LOGGER.info(
-                "economy_audit action={} transaction_id={} actor_uuid={} target_uuid={} delta={} reason={} timestamp={}",
-                action,
-                transactionId,
-                actor.getUUID(),
-                target.getUUID(),
-                delta,
-                reason,
-                Instant.now());
-    }
 }

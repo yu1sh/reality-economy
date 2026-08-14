@@ -28,6 +28,29 @@ grant/revoke mutations and administrator inspections receive a server-generated
 transaction ID and write an `economy_audit` record to the server log containing
 the transaction ID, actor UUID, target UUID, delta, reason, and timestamp.
 
+## Economy GUI and command fallback
+
+`/realityeconomy balance gui` opens the slotless Economy GUI. It is the complete
+GUI entry point for the Economy command surface; a permission-level-2 operator
+sees the administrator controls, while an ordinary player sees their own
+balance only.
+
+| Command path | Equivalent Economy GUI action |
+| --- | --- |
+| `/realityeconomy balance` | `Refresh balance` and the server-produced own-balance snapshot |
+| `/realityeconomy admin grant <online-player> <nonnegative-amount> <single-word-reason>` | Select an online player, enter the same amount and reason, then `Grant` |
+| `/realityeconomy admin revoke <online-player> <nonnegative-amount> <single-word-reason>` | Select an online player, enter the same amount and reason, then `Revoke` |
+| `/realityeconomy admin inspect <online-player>` | Select an online player, then `Inspect` |
+
+The GUI request contains only a request identity, the active menu ID, an
+operation, an online-player name, an amount, and a reason. The server derives
+the actor from the current network sender and rechecks the menu session,
+permission level, online target, amount/reason bounds, request replay, and
+current ledger state. It returns a server-produced snapshot containing the
+current balance, permission view, target result, transaction ID, and message;
+the client does not provide any of those values as authority. The existing
+commands remain available as the management and automation fallback.
+
 ## Shop v1
 
 The implemented shop has ID `default`. Its catalog is persisted per world
@@ -92,7 +115,7 @@ changing state. Shop catalog mutations, purchases, recovery actions, clerk
 changes, and reset outcomes are stored in the shop's persistent audit/request
 records.
 
-## GUI and command fallback
+## Shop GUI and command fallback
 
 `/realityeconomy shop open` opens a slotless Shop menu. After it is open, the
 GUI exposes the Shop v1 list, detail, purchase, clerk catalog, clerk assignment,
@@ -101,9 +124,9 @@ commands remain available as the fallback path.
 
 The client renders server-produced snapshots and sends untrusted requests. It
 does not own balances, catalog entries, permissions, purchase status, or
-recovery decisions; all state-changing GUI actions are explicit validated
-server requests. The balance and economy-ledger admin commands above remain
-command paths rather than being presented as Shop GUI actions.
+recovery decisions; all state-changing Shop GUI actions are explicit validated
+server requests. The Economy GUI above is separate from the Shop GUI and does
+not change Shop contracts or ledger semantics.
 
 ## Recovery and reset
 
