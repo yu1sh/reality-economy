@@ -2,11 +2,12 @@
 
 `reality-economy` is a server-authoritative Forge Mod for Minecraft 1.20.1
 (Forge 47.4.10). It stores one non-item currency balance per player UUID in a
-persistent ledger owned by the current world. The ledger is stored through the
-overworld `SavedData`, so all dimensions in one world share balances while
-different worlds have separate ledgers. A new player starts at balance `0`.
+persistent ledger owned by the current world. The ledger and Shop state use the
+overworld `SavedData`, so all dimensions in one world share the same economy
+and shop state while different worlds have separate state. A new player starts
+at balance `0`.
 
-## Commands
+## Economy commands
 
 All commands are server-side and player-only. Console, command blocks, and
 other non-player sources fail without changing state. Player arguments are
@@ -22,20 +23,111 @@ accepted.
   balance to a permission-level-2 administrator.
 
 The `admin` branch requires permission level 2. Grant overflow and revoke
-underflow are rejected atomically, leaving the ledger unchanged. All accepted
-mutations and administrator inspections receive a server-generated transaction
-ID and write an `economy_audit` record to the server log containing the
-transaction ID, actor UUID, target UUID, delta, reason, and timestamp. No
-client-supplied balance, amount, or transaction is trusted.
+underflow are rejected atomically, leaving the ledger unchanged. Accepted
+grant/revoke mutations and administrator inspections receive a server-generated
+transaction ID and write an `economy_audit` record to the server log containing
+the transaction ID, actor UUID, target UUID, delta, reason, and timestamp.
+
+## Shop v1
+
+The implemented shop has ID `default`. Its catalog is persisted per world
+epoch and begins with these active entries at catalog revision `1`:
+
+| Entry | Item | Quantity | Price |
+| --- | --- | ---: | ---: |
+| `bundle_a_food_bread` | `minecraft:bread` | 16 | 12 |
+| `bundle_a_light_torch` | `minecraft:torch` | 32 | 8 |
+| `bundle_a_build_oak_planks` | `minecraft:oak_planks` | 32 | 10 |
+| `bundle_b_food_cooked_beef` | `minecraft:cooked_beef` | 8 | 14 |
+| `bundle_b_light_torch` | `minecraft:torch` | 16 | 6 |
+| `bundle_b_build_cobblestone` | `minecraft:cobblestone` | 64 | 18 |
+
+Catalog rules and management are server-validated:
+
+- At most 16 entries can be active and at most 256 entries are retained.
+  Catalog pages contain at most 16 entries.
+- Only an appointed clerk can add, change, stop, or resume entries, and the
+  submitted catalog revision must still be current.
+- Add/change accepts only the server's allowlisted, tag-free vanilla items;
+  quantity must be at least `1`, no more than `64`, and no more than the item's
+  stack size. Price must be between `1` and `100000`.
+- Stopped entries remain retained but are hidden from ordinary catalog views.
+  Clerks and permission-level-2 administrators can inspect inactive entries.
+- A permission-level-2 administrator appoints or revokes another online player
+  as clerk. An administrator cannot appoint or revoke themself.
+
+Purchasing requires the current catalog revision, an active entry, enough
+balance, enough inventory capacity, and no unresolved recovery for the buyer.
+The server journals a purchase as `PENDING` before delivery, confirms the item
+delivery, and then applies a ledger debit keyed by the server-generated
+purchase ID. The debit record is persistent and cannot be applied twice on a
+retry. A delivery that cannot be confirmed becomes `RECOVERY_REQUIRED` without
+a debit; a confirmed delivery whose debit does not commit also becomes
+`RECOVERY_REQUIRED`, with the delivered item retained.
+
+Shop command paths are:
+
+```text
+/realityeconomy shop open
+/realityeconomy shop list
+/realityeconomy shop detail <entry> <revision>
+/realityeconomy shop purchase <entry> <revision>
+/realityeconomy shop clerk add <item> <quantity> <price> <revision>
+/realityeconomy shop clerk change <entry> <item> <quantity> <price> <revision>
+/realityeconomy shop clerk stop <entry> <revision>
+/realityeconomy shop clerk resume <entry> <revision>
+/realityeconomy shop admin appoint <online-player>
+/realityeconomy shop admin revoke <online-player>
+/realityeconomy shop admin recovery status
+/realityeconomy shop admin recovery retry <purchase_id> <revision>
+/realityeconomy shop admin recovery resolve <purchase_id> <revision>
+/realityeconomy shop admin reset
+```
+
+The `shop admin` branch requires permission level 2. Shop requests and command
+calls use the same server-side service. The server checks the actor, open menu,
+protocol, shop ID, world epoch, catalog revision, input bounds, and the
+operation-specific permission, item, balance, and inventory rules before
+changing state. Shop catalog mutations, purchases, recovery actions, clerk
+changes, and reset outcomes are stored in the shop's persistent audit/request
+records.
+
+## GUI and command fallback
+
+`/realityeconomy shop open` opens a slotless Shop menu. After it is open, the
+GUI exposes the Shop v1 list, detail, purchase, clerk catalog, clerk assignment,
+recovery, and reset actions. The corresponding `/realityeconomy shop ...`
+commands remain available as the fallback path.
+
+The client renders server-produced snapshots and sends untrusted requests. It
+does not own balances, catalog entries, permissions, purchase status, or
+recovery decisions; all state-changing GUI actions are explicit validated
+server requests. The balance and economy-ledger admin commands above remain
+command paths rather than being presented as Shop GUI actions.
+
+## Recovery and reset
+
+Shop purchase journals survive a restart. Unresolved `PENDING` or
+`ITEM_DELIVERED` records are moved into recovery handling on load; a matching
+persistent debit can be reconciled, and a delivery-confirmed recovery can have
+its debit retried. A buyer with an unresolved purchase is stopped from making
+new purchases until recovery is resolved.
+
+Permission-level-2 administrators can use recovery status, debit retry, and
+uncertain-delivery resolution. A retry is allowed only when delivery is
+confirmed. Resolution refuses a conflicting debit; a matching debit can mark
+the purchase committed without another delivery attempt, while an unresolved
+delivery with no debit can be closed as failed without retrying delivery or
+debit.
+
+`/realityeconomy shop admin reset` starts a new world epoch, clears the current
+economy ledger, and seeds a fresh catalog. Previous shop purchases and audit
+records remain in retained epochs, and the previous ledger data is archived.
 
 ## v1 boundary
 
-The approved v1 policy allows fixed-price server-owned shop purchases, but the
-shop catalog and prices are not decided yet, so shop purchasing is deliberately
-not implemented here. Player-to-player transfers, NPC integration, client UI,
-network packets, tick handlers, configuration, databases, external Mod or
-Foundation/core dependencies, audit-retention policy, and reset operations are
-also outside this v1.
+Player-to-player transfers and NPC integration are not implemented in this
+Shop v1 surface.
 
 ## Build
 
