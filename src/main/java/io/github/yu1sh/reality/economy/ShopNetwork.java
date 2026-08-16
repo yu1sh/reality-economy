@@ -17,7 +17,7 @@ import net.minecraftforge.network.simple.SimpleChannel;
 
 /** Versioned, server-produced Shop GUI request/snapshot contract. */
 public final class ShopNetwork {
-    private static final String PROTOCOL_VERSION = "2";
+    private static final String PROTOCOL_VERSION = "3";
     public static final SimpleChannel CHANNEL = NetworkRegistry.newSimpleChannel(
             new ResourceLocation(RealityEconomyMod.MOD_ID, "shop"),
             () -> PROTOCOL_VERSION,
@@ -61,6 +61,7 @@ public final class ShopNetwork {
         private final int menuId;
         private final long revision;
         private final int page;
+        private final int itemPage;
         private final int operationCode;
         private final String entryId;
         private final String itemId;
@@ -78,6 +79,7 @@ public final class ShopNetwork {
                 int menuId,
                 long revision,
                 int page,
+                int itemPage,
                 int operationCode,
                 String entryId,
                 String itemId,
@@ -93,6 +95,7 @@ public final class ShopNetwork {
             this.menuId = menuId;
             this.revision = revision;
             this.page = page;
+            this.itemPage = itemPage;
             this.operationCode = operationCode;
             this.entryId = entryId;
             this.itemId = itemId;
@@ -110,6 +113,7 @@ public final class ShopNetwork {
                 int menuId,
                 long revision,
                 int page,
+                int itemPage,
                 ShopDomain.Operation operation,
                 String entryId,
                 String itemId,
@@ -126,6 +130,7 @@ public final class ShopNetwork {
                     menuId,
                     revision,
                     page,
+                    itemPage,
                     operation == null ? -1 : operation.code(),
                     entryId,
                     itemId,
@@ -167,6 +172,10 @@ public final class ShopNetwork {
             return page;
         }
 
+        int itemPage() {
+            return itemPage;
+        }
+
         int operationCode() {
             return operationCode;
         }
@@ -204,6 +213,7 @@ public final class ShopNetwork {
             buffer.writeVarInt(request.menuId);
             buffer.writeVarLong(request.revision);
             buffer.writeVarInt(request.page);
+            buffer.writeVarInt(request.itemPage);
             buffer.writeVarInt(request.operationCode);
             buffer.writeUtf(request.entryId, ShopDomain.MAX_ID_LENGTH);
             buffer.writeUtf(request.itemId, ShopDomain.MAX_ITEM_ID_LENGTH);
@@ -222,6 +232,7 @@ public final class ShopNetwork {
                     buffer.readUtf(32),
                     buffer.readVarInt(),
                     buffer.readVarLong(),
+                    buffer.readVarInt(),
                     buffer.readVarInt(),
                     buffer.readVarInt(),
                     buffer.readUtf(ShopDomain.MAX_ID_LENGTH),
@@ -255,9 +266,12 @@ public final class ShopNetwork {
         private final boolean recoveryBlocked;
         private final int page;
         private final int totalEntries;
+        private final int itemPage;
+        private final int totalItemChoices;
         private final String selectedEntryId;
         private final EntryView selectedEntry;
         private final List<EntryView> entries;
+        private final List<ItemView> itemChoices;
         private final List<RecoveryView> recoveries;
         private final String message;
 
@@ -272,9 +286,12 @@ public final class ShopNetwork {
                 boolean recoveryBlocked,
                 int page,
                 int totalEntries,
+                int itemPage,
+                int totalItemChoices,
                 String selectedEntryId,
                 EntryView selectedEntry,
                 List<EntryView> entries,
+                List<ItemView> itemChoices,
                 List<RecoveryView> recoveries,
                 String message) {
             this.protocolVersion = protocolVersion;
@@ -287,9 +304,12 @@ public final class ShopNetwork {
             this.recoveryBlocked = recoveryBlocked;
             this.page = page;
             this.totalEntries = totalEntries;
+            this.itemPage = itemPage;
+            this.totalItemChoices = totalItemChoices;
             this.selectedEntryId = selectedEntryId;
             this.selectedEntry = selectedEntry;
             this.entries = List.copyOf(entries);
+            this.itemChoices = List.copyOf(itemChoices);
             this.recoveries = List.copyOf(recoveries);
             this.message = message;
         }
@@ -330,6 +350,14 @@ public final class ShopNetwork {
             return totalEntries;
         }
 
+        public int itemPage() {
+            return itemPage;
+        }
+
+        public int totalItemChoices() {
+            return totalItemChoices;
+        }
+
         public String selectedEntryId() {
             return selectedEntryId;
         }
@@ -340,6 +368,10 @@ public final class ShopNetwork {
 
         public List<EntryView> entries() {
             return entries;
+        }
+
+        public List<ItemView> itemChoices() {
+            return itemChoices;
         }
 
         public List<RecoveryView> recoveries() {
@@ -361,6 +393,8 @@ public final class ShopNetwork {
             buffer.writeBoolean(snapshot.recoveryBlocked);
             buffer.writeVarInt(snapshot.page);
             buffer.writeVarInt(snapshot.totalEntries);
+            buffer.writeVarInt(snapshot.itemPage);
+            buffer.writeVarInt(snapshot.totalItemChoices);
             buffer.writeBoolean(snapshot.selectedEntry != null);
             if (snapshot.selectedEntry != null) {
                 writeEntry(snapshot.selectedEntry, buffer);
@@ -368,6 +402,18 @@ public final class ShopNetwork {
             buffer.writeVarInt(snapshot.entries.size());
             for (EntryView entry : snapshot.entries) {
                 writeEntry(entry, buffer);
+            }
+            if (snapshot.itemPage < 0 || snapshot.itemPage >= ShopDomain.MAX_ITEM_PICKER_PAGES
+                    || snapshot.totalItemChoices < 0
+                    || snapshot.totalItemChoices > ShopDomain.MAX_ITEM_PICKER_ITEMS
+                    || snapshot.itemChoices.size() > ShopDomain.ITEM_PICKER_PAGE_SIZE
+                    || snapshot.itemChoices.size() > snapshot.totalItemChoices
+                    || (!snapshot.clerk && (snapshot.totalItemChoices != 0 || !snapshot.itemChoices.isEmpty()))) {
+                throw new IllegalArgumentException("invalid Shop item picker view");
+            }
+            buffer.writeVarInt(snapshot.itemChoices.size());
+            for (ItemView itemChoice : snapshot.itemChoices) {
+                writeItemChoice(itemChoice, buffer);
             }
             if (snapshot.recoveries.size() > ShopDomain.MAX_RECOVERY_VIEWS) {
                 throw new IllegalArgumentException("invalid Shop recovery view count");
@@ -393,6 +439,13 @@ public final class ShopNetwork {
             boolean recoveryBlocked = buffer.readBoolean();
             int page = buffer.readVarInt();
             int totalEntries = buffer.readVarInt();
+            int itemPage = buffer.readVarInt();
+            int totalItemChoices = buffer.readVarInt();
+            if (itemPage < 0 || itemPage >= ShopDomain.MAX_ITEM_PICKER_PAGES
+                    || totalItemChoices < 0 || totalItemChoices > ShopDomain.MAX_ITEM_PICKER_ITEMS
+                    || (!clerk && totalItemChoices != 0)) {
+                throw new IllegalArgumentException("invalid Shop item picker page");
+            }
             EntryView selectedEntry = buffer.readBoolean() ? readEntry(buffer) : null;
             int entryCount = buffer.readVarInt();
             if (entryCount < 0 || entryCount > ShopDomain.MAX_PAGE_SIZE) {
@@ -401,6 +454,16 @@ public final class ShopNetwork {
             List<EntryView> entries = new java.util.ArrayList<>();
             for (int index = 0; index < entryCount; index++) {
                 entries.add(readEntry(buffer));
+            }
+            int itemChoiceCount = buffer.readVarInt();
+            if (itemChoiceCount < 0 || itemChoiceCount > ShopDomain.ITEM_PICKER_PAGE_SIZE
+                    || itemChoiceCount > totalItemChoices
+                    || (!clerk && itemChoiceCount != 0)) {
+                throw new IllegalArgumentException("invalid Shop item picker count");
+            }
+            List<ItemView> itemChoices = new java.util.ArrayList<>();
+            for (int index = 0; index < itemChoiceCount; index++) {
+                itemChoices.add(readItemChoice(buffer));
             }
             int recoveryCount = buffer.readVarInt();
             if (recoveryCount < 0 || recoveryCount > ShopDomain.MAX_RECOVERY_VIEWS) {
@@ -422,9 +485,12 @@ public final class ShopNetwork {
                     recoveryBlocked,
                     page,
                     totalEntries,
+                    itemPage,
+                    totalItemChoices,
                     selectedEntry == null ? "" : selectedEntry.id(),
                     selectedEntry,
                     entries,
+                    itemChoices,
                     recoveries,
                     message);
         }
@@ -444,6 +510,19 @@ public final class ShopNetwork {
                     buffer.readVarInt(),
                     buffer.readVarLong(),
                     buffer.readBoolean());
+        }
+
+        private static void writeItemChoice(ItemView itemChoice, FriendlyByteBuf buffer) {
+            buffer.writeUtf(itemChoice.itemId(), ShopDomain.MAX_ITEM_ID_LENGTH);
+        }
+
+        private static ItemView readItemChoice(FriendlyByteBuf buffer) {
+            String itemId = buffer.readUtf(ShopDomain.MAX_ITEM_ID_LENGTH);
+            ResourceLocation location = ResourceLocation.tryParse(itemId);
+            if (location == null || itemId.isBlank() || !"minecraft".equals(location.getNamespace())) {
+                throw new IllegalArgumentException("invalid Shop item picker choice");
+            }
+            return new ItemView(itemId);
         }
 
         private static void writeRecovery(RecoveryView recovery, FriendlyByteBuf buffer) {
@@ -502,6 +581,9 @@ public final class ShopNetwork {
     }
 
     public record EntryView(String id, String itemId, int quantity, long price, boolean active) {
+    }
+
+    public record ItemView(String itemId) {
     }
 
     public record RecoveryView(

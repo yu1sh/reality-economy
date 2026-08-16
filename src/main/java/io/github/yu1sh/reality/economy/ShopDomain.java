@@ -6,13 +6,17 @@ import java.util.UUID;
 /** Minecraft-independent Shop v1 state and contract values. */
 public final class ShopDomain {
     public static final String SHOP_ID = "default";
-    public static final int PROTOCOL_VERSION = 2;
+    public static final int PROTOCOL_VERSION = 3;
     public static final int ACTIVE_ENTRY_LIMIT = 16;
     public static final int RETAINED_ENTRY_LIMIT = 256;
     public static final int MAX_QUANTITY = 64;
     public static final long MIN_PRICE = 1L;
     public static final long MAX_PRICE = 100_000L;
     public static final int MAX_PAGE_SIZE = 16;
+    public static final int ITEM_PICKER_PAGE_SIZE = 8;
+    public static final int MAX_ITEM_PICKER_ITEMS = 256;
+    public static final int MAX_ITEM_PICKER_PAGES =
+            (MAX_ITEM_PICKER_ITEMS + ITEM_PICKER_PAGE_SIZE - 1) / ITEM_PICKER_PAGE_SIZE;
     public static final int MAX_ID_LENGTH = 64;
     public static final int MAX_ITEM_ID_LENGTH = 128;
     public static final int MAX_PLAYER_NAME_LENGTH = 64;

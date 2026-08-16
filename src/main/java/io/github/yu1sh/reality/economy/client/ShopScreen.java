@@ -12,6 +12,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.entity.player.Inventory;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import org.lwjgl.glfw.GLFW;
 import io.github.yu1sh.reality.economy.RealityEconomyMod;
 import io.github.yu1sh.reality.economy.ShopDomain;
 import io.github.yu1sh.reality.economy.ShopMenu;
@@ -37,6 +38,12 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
     private ShopNetwork.ShopSnapshot snapshot;
     private String selectedEntryId = "";
     private String localMessage = "";
+    private int itemPickerPage;
+    private int itemChoiceIndex = -1;
+    private String draftEntryId = "";
+    private String draftItemId = "";
+    private String draftQuantity = "";
+    private String draftPrice = "";
     private EditBox itemBox;
     private EditBox quantityBox;
     private EditBox priceBox;
@@ -48,6 +55,9 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
         this.imageWidth = GUI_WIDTH;
         this.imageHeight = GUI_HEIGHT;
         this.snapshot = menu.snapshot();
+        if (snapshot != null) {
+            itemPickerPage = snapshot.itemPage();
+        }
     }
 
     @Override
@@ -57,9 +67,17 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
     }
 
     public void onServerSnapshot() {
+        rememberDraft();
         this.snapshot = menu.snapshot();
-        if (snapshot != null && !snapshot.selectedEntryId().isBlank()) {
-            selectedEntryId = snapshot.selectedEntryId();
+        if (snapshot != null) {
+            itemPickerPage = snapshot.itemPage();
+            if (!snapshot.selectedEntryId().isBlank()) {
+                selectedEntryId = snapshot.selectedEntryId();
+            }
+            if (isEditorMode() && !snapshot.clerk()) {
+                mode = Mode.LIST;
+                clearDraft();
+            }
         }
         rebuildWidgets();
     }
@@ -75,7 +93,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
 
         int left = leftPos;
         int top = topPos;
-        addRenderableWidget(Button.builder(Component.literal("Close"), button -> onClose())
+        addRenderableWidget(Button.builder(text("shop.close"), button -> onClose())
                 .bounds(left + GUI_WIDTH - 75, top + 8, 65, 20)
                 .build());
         if (snapshot == null) {
@@ -114,7 +132,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
         }
 
         if (snapshot.page() > 0) {
-            addRenderableWidget(Button.builder(Component.literal("Previous"), button -> {
+            addRenderableWidget(Button.builder(text("shop.previous"), button -> {
                         mode = Mode.LIST;
                         send(ShopDomain.Operation.LIST, "", "", 0, 0L, "", false, snapshot.page() - 1);
                     })
@@ -122,7 +140,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
                     .build());
         }
         if ((snapshot.page() + 1) * ShopDomain.MAX_PAGE_SIZE < snapshot.totalEntries()) {
-            addRenderableWidget(Button.builder(Component.literal("Next"), button -> {
+            addRenderableWidget(Button.builder(text("shop.next"), button -> {
                         mode = Mode.LIST;
                         send(ShopDomain.Operation.LIST, "", "", 0, 0L, "", false, snapshot.page() + 1);
                     })
@@ -130,16 +148,17 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
                     .build());
         }
         if (snapshot.clerk()) {
-            addRenderableWidget(Button.builder(Component.literal("Add item"), button -> {
+            addRenderableWidget(Button.builder(text("shop.add_item"), button -> {
                         mode = Mode.EDIT_ADD;
                         localMessage = "";
+                        clearDraft();
                         rebuildWidgets();
                     })
                     .bounds(left + 185, top + GUI_HEIGHT - 34, 80, 20)
                     .build());
         }
         if (snapshot.administrator()) {
-            addRenderableWidget(Button.builder(Component.literal("Admin"), button -> {
+            addRenderableWidget(Button.builder(text("shop.admin"), button -> {
                         mode = Mode.ADMIN;
                         localMessage = "";
                         rebuildWidgets();
@@ -151,38 +170,39 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
 
     private void buildDetailWidgets(int left, int top) {
         ShopNetwork.EntryView entry = snapshot.selectedEntry();
-        addRenderableWidget(Button.builder(Component.literal("Back"), button -> {
-                    mode = Mode.LIST;
-                    send(ShopDomain.Operation.LIST, "", "", 0, 0L, "", false, snapshot.page());
-                })
+        addRenderableWidget(Button.builder(text("shop.back"), button -> goBack())
                 .bounds(left + 10, top + GUI_HEIGHT - 34, 70, 20)
                 .build());
         if (entry == null) {
             return;
         }
         if (entry.active()) {
-            addRenderableWidget(Button.builder(Component.literal("Purchase"), button ->
+            addRenderableWidget(Button.builder(text("shop.purchase"), button ->
                             send(ShopDomain.Operation.PURCHASE, entry.id(), "", 0, 0L, "", false, snapshot.page()))
                     .bounds(left + 90, top + GUI_HEIGHT - 34, 80, 20)
                     .build());
         }
         if (snapshot.clerk()) {
-            addRenderableWidget(Button.builder(Component.literal("Change"), button -> {
+            addRenderableWidget(Button.builder(text("shop.change"), button -> {
                         mode = Mode.EDIT_CHANGE;
                         localMessage = "";
+                        draftEntryId = entry.id();
+                        draftItemId = entry.itemId();
+                        draftQuantity = Integer.toString(entry.quantity());
+                        draftPrice = Long.toString(entry.price());
                         rebuildWidgets();
                     })
                     .bounds(left + 180, top + GUI_HEIGHT - 34, 75, 20)
                     .build());
             if (entry.active()) {
-                addRenderableWidget(Button.builder(Component.literal("Stop"), button -> {
+                addRenderableWidget(Button.builder(text("shop.stop"), button -> {
                             mode = Mode.LIST;
                             send(ShopDomain.Operation.STOP, entry.id(), "", 0, 0L, "", false, snapshot.page());
                         })
                         .bounds(left + 260, top + GUI_HEIGHT - 34, 65, 20)
                         .build());
             } else {
-                addRenderableWidget(Button.builder(Component.literal("Resume"), button -> {
+                addRenderableWidget(Button.builder(text("shop.resume"), button -> {
                             mode = Mode.LIST;
                             send(ShopDomain.Operation.RESUME, entry.id(), "", 0, 0L, "", false, snapshot.page());
                         })
@@ -196,24 +216,28 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
         ShopNetwork.EntryView existing = snapshot.selectedEntry();
         int y = top + 66;
         itemBox = addRenderableWidget(new EditBox(
-                font, left + 170, y, 250, 20, Component.literal("item id")));
+                font, left + 170, y, 250, 20, text("shop.item_id")));
         itemBox.setMaxLength(ShopDomain.MAX_ITEM_ID_LENGTH);
         quantityBox = addRenderableWidget(new EditBox(
-                font, left + 170, y + 35, 100, 20, Component.literal("quantity")));
+                font, left + 170, y + 35, 100, 20, text("shop.quantity")));
         quantityBox.setMaxLength(3);
         priceBox = addRenderableWidget(new EditBox(
-                font, left + 170, y + 70, 100, 20, Component.literal("price")));
+                font, left + 170, y + 70, 100, 20, text("shop.price")));
         priceBox.setMaxLength(6);
-        if (change && existing != null) {
-            itemBox.setValue(existing.itemId());
-            quantityBox.setValue(Integer.toString(existing.quantity()));
-            priceBox.setValue(Long.toString(existing.price()));
+        if (change && existing != null && !existing.id().equals(draftEntryId)) {
+            draftEntryId = existing.id();
+            draftItemId = existing.itemId();
+            draftQuantity = Integer.toString(existing.quantity());
+            draftPrice = Long.toString(existing.price());
         }
-        addRenderableWidget(Button.builder(Component.literal(change ? "Apply change" : "Add entry"), button -> {
+        itemBox.setValue(draftItemId);
+        quantityBox.setValue(draftQuantity);
+        priceBox.setValue(draftPrice);
+        addRenderableWidget(Button.builder(text(change ? "shop.apply_change" : "shop.add_entry"), button -> {
                     long price = parseLong(priceBox.getValue());
                     int quantity = parseInt(quantityBox.getValue());
                     if (price < 0L || quantity < 0 || itemBox.getValue().isBlank()) {
-                        localMessage = "invalid input; server will also validate";
+                        localMessage = text("shop.invalid_input").getString();
                         return;
                     }
                     mode = Mode.LIST;
@@ -229,55 +253,54 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
                 })
                 .bounds(left + 170, y + 110, 110, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Cancel"), button -> {
+        addRenderableWidget(Button.builder(text("shop.cancel"), button -> {
+                    clearDraft();
                     mode = change ? Mode.DETAIL : Mode.LIST;
                     rebuildWidgets();
                 })
                 .bounds(left + 285, y + 110, 75, 20)
                 .build());
+        buildItemPickerWidgets(left, top, y + 110);
     }
 
     private void buildAdminWidgets(int left, int top) {
         playerBox = addRenderableWidget(new EditBox(
-                font, left + 170, top + 74, 250, 20, Component.literal("online player")));
+                font, left + 170, top + 74, 250, 20, text("shop.online_player")));
         playerBox.setMaxLength(ShopDomain.MAX_PLAYER_NAME_LENGTH);
-        addRenderableWidget(Button.builder(Component.literal("Appoint clerk"), button -> {
+        addRenderableWidget(Button.builder(text("shop.appoint_clerk"), button -> {
                     send(ShopDomain.Operation.APPOINT, "", "", 0, 0L, playerBox.getValue(), false, snapshot.page());
                 })
                 .bounds(left + 170, top + 110, 110, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Revoke clerk"), button -> {
+        addRenderableWidget(Button.builder(text("shop.revoke_clerk"), button -> {
                     send(ShopDomain.Operation.REVOKE, "", "", 0, 0L, playerBox.getValue(), false, snapshot.page());
                 })
                 .bounds(left + 285, top + 110, 110, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Reset world economy"), button -> {
+        addRenderableWidget(Button.builder(text("shop.reset_world_economy"), button -> {
                     mode = Mode.RESET;
                     rebuildWidgets();
                 })
                 .bounds(left + 170, top + 150, 150, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Back"), button -> {
-                    mode = Mode.LIST;
-                    rebuildWidgets();
-                })
+        addRenderableWidget(Button.builder(text("shop.back"), button -> goBack())
                 .bounds(left + 325, top + 150, 70, 20)
                 .build());
         purchaseBox = addRenderableWidget(new EditBox(
-                font, left + 170, top + 184, 250, 20, Component.literal("purchase id from server snapshot")));
+                font, left + 170, top + 184, 250, 20, text("shop.purchase_id")));
         purchaseBox.setMaxLength(64);
-        addRenderableWidget(Button.builder(Component.literal("Refresh recovery"), button -> {
+        addRenderableWidget(Button.builder(text("shop.refresh_recovery"), button -> {
                     send(ShopDomain.Operation.RECOVERY_STATUS, "", "", 0, 0L, "", false, snapshot.page());
                 })
                 .bounds(left + 10, top + 184, 145, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Retry debit"), button -> {
+        addRenderableWidget(Button.builder(text("shop.retry_debit"), button -> {
                     send(ShopDomain.Operation.RECOVERY_RETRY,
                             purchaseBox.getValue(), "", 0, 0L, "", false, snapshot.page());
                 })
                 .bounds(left + 170, top + 220, 110, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Resolve uncertain"), button -> {
+        addRenderableWidget(Button.builder(text("shop.resolve_uncertain"), button -> {
                     send(ShopDomain.Operation.RECOVERY_RESOLVE,
                             purchaseBox.getValue(), "", 0, 0L, "", false, snapshot.page());
                 })
@@ -288,7 +311,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
             ShopNetwork.RecoveryView recovery = snapshot.recoveries().get(index);
             int row = index;
             addRenderableWidget(Button.builder(
-                            Component.literal("Use " + truncate(recovery.purchaseId(), 10)),
+                            text("shop.use_purchase", truncate(recovery.purchaseId(), 10)),
                             button -> purchaseBox.setValue(recovery.purchaseId()))
                     .bounds(left + 10 + (index % 2) * 80, top + 250 + (index / 2) * 22, 75, 20)
                     .build());
@@ -296,18 +319,176 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
     }
 
     private void buildResetWidgets(int left, int top) {
-        addRenderableWidget(Button.builder(Component.literal("Confirm reset"), button -> {
+        addRenderableWidget(Button.builder(text("shop.confirm_reset"), button -> {
                     mode = Mode.LIST;
                     send(ShopDomain.Operation.RESET, "", "", 0, 0L, "", true, snapshot.page());
                 })
                 .bounds(left + 170, top + 120, 110, 20)
                 .build());
-        addRenderableWidget(Button.builder(Component.literal("Cancel"), button -> {
+        addRenderableWidget(Button.builder(text("shop.cancel"), button -> {
                     mode = Mode.ADMIN;
                     rebuildWidgets();
                 })
                 .bounds(left + 285, top + 120, 75, 20)
                 .build());
+    }
+
+    private void buildItemPickerWidgets(int left, int top, int navigationY) {
+        if (snapshot == null || !snapshot.clerk()) {
+            return;
+        }
+        int pickerTop = top + 66;
+        for (int index = 0; index < snapshot.itemChoices().size(); index++) {
+            ShopNetwork.ItemView itemChoice = snapshot.itemChoices().get(index);
+            int column = index % 2;
+            int row = index / 2;
+            addRenderableWidget(Button.builder(
+                            text("shop.item_choice", shortItemLabel(itemChoice.itemId())),
+                            button -> selectItem(itemChoice.itemId()))
+                    .bounds(left + 10 + column * 75, pickerTop + row * 24, 70, 20)
+                    .build());
+        }
+        if (snapshot.itemPage() > 0) {
+            addRenderableWidget(Button.builder(text("shop.previous"), button -> changeItemPage(-1))
+                    .bounds(left + 10, navigationY, 80, 20)
+                    .build());
+        }
+        if ((snapshot.itemPage() + 1) * ShopDomain.ITEM_PICKER_PAGE_SIZE
+                < snapshot.totalItemChoices()) {
+            addRenderableWidget(Button.builder(text("shop.next"), button -> changeItemPage(1))
+                    .bounds(left + 95, navigationY, 80, 20)
+                    .build());
+        }
+    }
+
+    private void selectItem(String itemId) {
+        draftItemId = itemId;
+        if (itemBox != null) {
+            itemBox.setValue(itemId);
+        }
+        if (snapshot != null) {
+            for (int index = 0; index < snapshot.itemChoices().size(); index++) {
+                if (snapshot.itemChoices().get(index).itemId().equals(itemId)) {
+                    itemChoiceIndex = index;
+                    break;
+                }
+            }
+        }
+    }
+
+    private void changeItemPage(int delta) {
+        if (snapshot == null || !snapshot.clerk() || snapshot.totalItemChoices() == 0) {
+            return;
+        }
+        int maxPage = (snapshot.totalItemChoices() - 1) / ShopDomain.ITEM_PICKER_PAGE_SIZE;
+        int nextPage = Math.max(0, Math.min(snapshot.itemPage() + delta, maxPage));
+        if (nextPage == snapshot.itemPage()) {
+            return;
+        }
+        rememberDraft();
+        itemPickerPage = nextPage;
+        itemChoiceIndex = -1;
+        send(ShopDomain.Operation.LIST, "", "", 0, 0L, "", false, snapshot.page());
+    }
+
+    private void moveItemChoice(int delta) {
+        if (snapshot == null || snapshot.itemChoices().isEmpty()) {
+            return;
+        }
+        int nextIndex = itemChoiceIndex < 0 ? 0 : itemChoiceIndex + delta;
+        nextIndex = Math.max(0, Math.min(nextIndex, snapshot.itemChoices().size() - 1));
+        itemChoiceIndex = nextIndex;
+        selectItem(snapshot.itemChoices().get(nextIndex).itemId());
+    }
+
+    private void rememberDraft() {
+        if (!isEditorMode()) {
+            return;
+        }
+        if (itemBox != null) {
+            draftItemId = itemBox.getValue();
+        }
+        if (quantityBox != null) {
+            draftQuantity = quantityBox.getValue();
+        }
+        if (priceBox != null) {
+            draftPrice = priceBox.getValue();
+        }
+    }
+
+    private void clearDraft() {
+        draftEntryId = "";
+        draftItemId = "";
+        draftQuantity = "";
+        draftPrice = "";
+        itemChoiceIndex = -1;
+    }
+
+    private void goBack() {
+        switch (mode) {
+            case DETAIL -> {
+                mode = Mode.LIST;
+                send(ShopDomain.Operation.LIST, "", "", 0, 0L, "", false, snapshot.page());
+            }
+            case EDIT_ADD -> {
+                clearDraft();
+                mode = Mode.LIST;
+                rebuildWidgets();
+            }
+            case EDIT_CHANGE -> {
+                clearDraft();
+                mode = Mode.DETAIL;
+                rebuildWidgets();
+            }
+            case ADMIN -> {
+                mode = Mode.LIST;
+                rebuildWidgets();
+            }
+            case RESET -> {
+                mode = Mode.ADMIN;
+                rebuildWidgets();
+            }
+            case LIST -> onClose();
+            default -> {
+            }
+        }
+    }
+
+    private boolean isEditorMode() {
+        return mode == Mode.EDIT_ADD || mode == Mode.EDIT_CHANGE;
+    }
+
+    @Override
+    public boolean keyPressed(int keyCode, int scanCode, int modifiers) {
+        if (keyCode == GLFW.GLFW_KEY_ESCAPE && mode != Mode.LIST) {
+            goBack();
+            return true;
+        }
+        if (isEditorMode() && snapshot != null && snapshot.clerk()
+                && !(getFocused() instanceof EditBox)) {
+            if (keyCode == GLFW.GLFW_KEY_PAGE_UP) {
+                changeItemPage(-1);
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_PAGE_DOWN) {
+                changeItemPage(1);
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_LEFT || keyCode == GLFW.GLFW_KEY_UP) {
+                moveItemChoice(-1);
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_RIGHT || keyCode == GLFW.GLFW_KEY_DOWN) {
+                moveItemChoice(1);
+                return true;
+            }
+            if ((keyCode == GLFW.GLFW_KEY_ENTER || keyCode == GLFW.GLFW_KEY_KP_ENTER)
+                    && getFocused() == null) {
+                moveItemChoice(0);
+                return true;
+            }
+        }
+        return super.keyPressed(keyCode, scanCode, modifiers);
     }
 
     private void send(
@@ -322,6 +503,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
         if (snapshot == null || Minecraft.getInstance().player == null) {
             return;
         }
+        rememberDraft();
         ShopNetwork.sendToServer(ShopNetwork.ShopRequest.create(
                 UUID.randomUUID(),
                 Minecraft.getInstance().player.getUUID(),
@@ -330,6 +512,7 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
                 menu.containerId,
                 snapshot.revision(),
                 page,
+                itemPickerPage,
                 operation,
                 safe(entryId),
                 safe(itemId),
@@ -347,28 +530,31 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
 
     @Override
     protected void renderLabels(GuiGraphics graphics, int mouseX, int mouseY) {
-        graphics.drawString(font, "Reality Shop", 10, 10, 0xFFFFFF);
+        graphics.drawString(font, text("shop.title"), 10, 10, 0xFFFFFF);
         if (snapshot == null) {
-            graphics.drawString(font, "waiting for server snapshot", 10, 30, 0xFFAA00);
+            graphics.drawString(font, text("shop.waiting"), 10, 30, 0xFFAA00);
             return;
         }
         graphics.drawString(
                 font,
-                "epoch=" + snapshot.worldEpoch().substring(0, Math.min(8, snapshot.worldEpoch().length()))
-                        + " revision=" + snapshot.revision()
-                        + " page=" + (snapshot.page() + 1),
+                text("shop.status",
+                        snapshot.worldEpoch().substring(0, Math.min(8, snapshot.worldEpoch().length())),
+                        snapshot.revision(),
+                        snapshot.page() + 1),
                 10,
                 28,
                 0xB0B0B0);
         String serverMessage = snapshot.message();
         if (!serverMessage.isBlank()) {
-            graphics.drawString(font, truncate(serverMessage, 72), 10, GUI_HEIGHT - 55, 0xFFFF55);
+            graphics.drawString(font, text("shop.server_message", truncate(serverMessage, 72)),
+                    10, GUI_HEIGHT - 55, 0xFFFF55);
         }
         if (!localMessage.isBlank()) {
-            graphics.drawString(font, truncate(localMessage, 72), 10, GUI_HEIGHT - 70, 0xFFAA00);
+            graphics.drawString(font, text("shop.local_message", truncate(localMessage, 72)),
+                    10, GUI_HEIGHT - 70, 0xFFAA00);
         }
         if (snapshot.recoveryBlocked()) {
-            graphics.drawString(font, "RECOVERY REQUIRED: this buyer is stopped", 10, 42, 0xFF5555);
+            graphics.drawString(font, text("shop.recovery_required"), 10, 42, 0xFF5555);
         }
 
         if (mode == Mode.LIST) {
@@ -380,21 +566,35 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
             }
         } else if (mode == Mode.DETAIL && snapshot.selectedEntry() != null) {
             ShopNetwork.EntryView entry = snapshot.selectedEntry();
-            graphics.drawString(font, "entry=" + entry.id(), 20, 72, 0xFFFFFF);
-            graphics.drawString(font, "item=" + entry.itemId(), 20, 90, 0xFFFFFF);
-            graphics.drawString(font, "quantity=" + entry.quantity(), 20, 108, 0xFFFFFF);
-            graphics.drawString(font, "price=" + entry.price(), 20, 126, 0xFFFFFF);
-            graphics.drawString(font, "active=" + entry.active(), 20, 144, 0xFFFFFF);
+            graphics.drawString(font, text("shop.entry", entry.id()), 20, 72, 0xFFFFFF);
+            graphics.drawString(font, text("shop.item", entry.itemId()), 20, 90, 0xFFFFFF);
+            graphics.drawString(font, text("shop.quantity_value", entry.quantity()), 20, 108, 0xFFFFFF);
+            graphics.drawString(font, text("shop.price_value", entry.price()), 20, 126, 0xFFFFFF);
+            graphics.drawString(font, text("shop.active", entry.active()), 20, 144, 0xFFFFFF);
             drawItemIcon(graphics, entry.itemId(), leftPos + 350, topPos + 80);
         } else if (mode == Mode.EDIT_ADD || mode == Mode.EDIT_CHANGE) {
-            graphics.drawString(font, mode == Mode.EDIT_ADD ? "Add catalog entry" : "Change catalog entry", 20, 48, 0xFFFFFF);
-            graphics.drawString(font, "item id", 60, 72, 0xFFFFFF);
-            graphics.drawString(font, "quantity 1..stack", 60, 107, 0xFFFFFF);
-            graphics.drawString(font, "price 1..100000", 60, 142, 0xFFFFFF);
+            graphics.drawString(font,
+                    text(mode == Mode.EDIT_ADD ? "shop.add_catalog_entry" : "shop.change_catalog_entry"),
+                    20, 48, 0xFFFFFF);
+            graphics.drawString(font, text("shop.item_picker"), 10, 58, 0xB0B0B0);
+            graphics.drawString(font, text("shop.item_id"), 170, 58, 0xFFFFFF);
+            graphics.drawString(font, text("shop.quantity_hint"), 170, 93, 0xFFFFFF);
+            graphics.drawString(font, text("shop.price_hint"), 170, 128, 0xFFFFFF);
+            if (snapshot.clerk() && snapshot.totalItemChoices() > 0) {
+                int totalPages = (snapshot.totalItemChoices() - 1) / ShopDomain.ITEM_PICKER_PAGE_SIZE + 1;
+                graphics.drawString(font, text("shop.item_picker_page", snapshot.itemPage() + 1, totalPages),
+                        10, 168, 0xB0B0B0);
+                for (int index = 0; index < snapshot.itemChoices().size(); index++) {
+                    ShopNetwork.ItemView itemChoice = snapshot.itemChoices().get(index);
+                    drawItemIcon(graphics, itemChoice.itemId(),
+                            leftPos + 12 + (index % 2) * 75,
+                            topPos + 68 + (index / 2) * 24);
+                }
+            }
         } else if (mode == Mode.ADMIN) {
-            graphics.drawString(font, "Administrator controls", 20, 52, 0xFFFFFF);
-            graphics.drawString(font, "target must be another online player", 60, 64, 0xB0B0B0);
-            graphics.drawString(font, "Recovery records (server snapshot): " + snapshot.recoveries().size(), 20, 174, 0xFFFFFF);
+            graphics.drawString(font, text("shop.administrator_controls"), 20, 52, 0xFFFFFF);
+            graphics.drawString(font, text("shop.target_another_online"), 60, 64, 0xB0B0B0);
+            graphics.drawString(font, text("shop.recovery_records", snapshot.recoveries().size()), 20, 174, 0xFFFFFF);
             int recoveryIndex = 0;
             for (ShopNetwork.RecoveryView recovery : snapshot.recoveries()) {
                 if (recoveryIndex >= 3) {
@@ -402,18 +602,16 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
                 }
                 graphics.drawString(
                         font,
-                        truncate(recovery.purchaseId(), 10)
-                                + " " + recovery.status()
-                                + " delivery=" + recovery.deliveryConfirmed()
-                                + " debit=" + recovery.debitRecorded(),
+                        text("shop.recovery_line", truncate(recovery.purchaseId(), 10), recovery.status(),
+                                recovery.deliveryConfirmed(), recovery.debitRecorded()),
                         20,
                         188 + recoveryIndex * 18,
                         recovery.deliveryConfirmed() ? 0xFFFF55 : 0xFFAA55);
                 recoveryIndex++;
             }
         } else if (mode == Mode.RESET) {
-            graphics.drawString(font, "Reset starts a new epoch, empty ledger, and seeded catalog.", 20, 72, 0xFFFF55);
-            graphics.drawString(font, "Old purchases and audit records are retained.", 20, 90, 0xFFFFFF);
+            graphics.drawString(font, text("shop.reset_warning"), 20, 72, 0xFFFF55);
+            graphics.drawString(font, text("shop.reset_retained"), 20, 90, 0xFFFFFF);
         }
     }
 
@@ -431,6 +629,15 @@ public final class ShopScreen extends AbstractContainerScreen<ShopMenu> {
     private static String shortLabel(ShopNetwork.EntryView entry) {
         String state = entry.active() ? "" : " [stopped]";
         return truncate(entry.id() + " " + entry.quantity() + "x @" + entry.price() + state, 23);
+    }
+
+    private static String shortItemLabel(String itemId) {
+        ResourceLocation location = ResourceLocation.tryParse(itemId);
+        return truncate(location == null ? itemId : location.getPath(), 11);
+    }
+
+    private static Component text(String key, Object... arguments) {
+        return Component.translatable("reality_economy." + key, arguments);
     }
 
     private static int parseInt(String value) {

@@ -21,9 +21,9 @@ final class ShopService {
     static void openShop(ServerPlayer player) {
         player.openMenu(new SimpleMenuProvider(
                 (windowId, inventory, ignored) -> new ShopMenu(RealityEconomyMod.SHOP_MENU, windowId, inventory),
-                Component.literal("Reality Shop")));
+                Component.translatable("reality_economy.shop.title")));
         if (player.containerMenu instanceof ShopMenu menu) {
-            sendSnapshot(player, menu.containerId, 0, "", "shop opened");
+            sendSnapshot(player, menu.containerId, 0, 0, "", "shop opened");
         }
     }
 
@@ -172,7 +172,7 @@ final class ShopService {
 
         if (request.requestId() == null || request.actorId() == null
                 || !player.getUUID().equals(request.actorId())) {
-            sendSnapshot(player, menu.containerId, 0, "", "request actor rejected");
+            sendSnapshot(player, menu.containerId, 0, 0, "", "request actor rejected");
             return;
         }
 
@@ -181,14 +181,14 @@ final class ShopService {
         if (previousRequest != null || previousPurchase != null) {
             UUID previousActor = previousRequest != null ? previousRequest.actor() : previousPurchase.buyer();
             if (!player.getUUID().equals(previousActor)) {
-                sendSnapshot(player, menu.containerId, 0, "", "duplicate request identity rejected");
+                sendSnapshot(player, menu.containerId, 0, 0, "", "duplicate request identity rejected");
                 return;
             }
             String message = previousPurchase != null
                     ? "duplicate purchase request: " + previousPurchase.status().name()
                             + " purchase_id=" + previousPurchase.purchaseId()
                     : "duplicate request: " + previousRequest.message();
-            sendSnapshot(player, menu.containerId, request.page(), request.entryId(), message);
+            sendSnapshot(player, menu.containerId, request.page(), request.itemPage(), request.entryId(), message);
             return;
         }
 
@@ -201,15 +201,18 @@ final class ShopService {
                 || request.revision() < 1L
                 || request.revision() != data.currentRevision()
                 || request.page() < 0
-                || request.page() >= ShopDomain.RETAINED_ENTRY_LIMIT / ShopDomain.MAX_PAGE_SIZE) {
-            sendSnapshot(player, menu.containerId, 0, "", "request contract rejected; refresh the shop");
+                || request.page() >= ShopDomain.RETAINED_ENTRY_LIMIT / ShopDomain.MAX_PAGE_SIZE
+                || request.itemPage() < 0
+                || request.itemPage() >= ShopDomain.MAX_ITEM_PICKER_PAGES) {
+            sendSnapshot(player, menu.containerId, 0, 0, "", "request contract rejected; refresh the shop");
             return;
         }
         if (request.quantity() < 0
                 || request.quantity() > ShopDomain.MAX_QUANTITY
                 || request.price() < 0L
                 || request.price() > ShopDomain.MAX_PRICE) {
-            sendSnapshot(player, menu.containerId, request.page(), "", "request input bounds rejected");
+            sendSnapshot(player, menu.containerId, request.page(), request.itemPage(), "",
+                    "request input bounds rejected");
             return;
         }
 
@@ -271,7 +274,7 @@ final class ShopService {
         }
 
         String selected = result.selectedEntryId() == null ? request.entryId() : result.selectedEntryId();
-        sendSnapshot(player, menu.containerId, request.page(), selected, result.message());
+        sendSnapshot(player, menu.containerId, request.page(), request.itemPage(), selected, result.message());
     }
 
     private static Result listSnapshot(ServerPlayer player, ShopNetwork.ShopRequest request) {
@@ -1105,6 +1108,7 @@ final class ShopService {
             ServerPlayer player,
             int menuId,
             int requestedPage,
+            int requestedItemPage,
             String selectedEntryId,
             String message) {
         ShopData data = data(player);
@@ -1119,6 +1123,18 @@ final class ShopService {
         List<ShopNetwork.EntryView> entries = new ArrayList<>();
         for (int index = from; index < to; index++) {
             entries.add(toView(allEntries.get(index)));
+        }
+        List<String> allItemChoices = clerk ? ItemPolicy.pickerItemIds() : List.of();
+        if (allItemChoices.size() > ShopDomain.MAX_ITEM_PICKER_ITEMS) {
+            throw new IllegalStateException("Shop item picker allowlist exceeds snapshot bound");
+        }
+        int maxItemPage = Math.max(0, (allItemChoices.size() - 1) / ShopDomain.ITEM_PICKER_PAGE_SIZE);
+        int itemPage = Math.max(0, Math.min(requestedItemPage, maxItemPage));
+        int itemFrom = Math.min(itemPage * ShopDomain.ITEM_PICKER_PAGE_SIZE, allItemChoices.size());
+        int itemTo = Math.min(itemFrom + ShopDomain.ITEM_PICKER_PAGE_SIZE, allItemChoices.size());
+        List<ShopNetwork.ItemView> itemChoices = new ArrayList<>();
+        for (int index = itemFrom; index < itemTo; index++) {
+            itemChoices.add(new ShopNetwork.ItemView(allItemChoices.get(index)));
         }
         ShopNetwork.EntryView selected = null;
         if (selectedEntryId != null && ShopDomain.validId(selectedEntryId, ShopDomain.MAX_ID_LENGTH)) {
@@ -1142,9 +1158,12 @@ final class ShopService {
                 data.recoveryBlockedFor(player.getUUID()),
                 page,
                 allEntries.size(),
+                itemPage,
+                allItemChoices.size(),
                 selected == null ? "" : selected.id(),
                 selected,
                 entries,
+                itemChoices,
                 recoveries,
                 message == null ? "" : message));
     }

@@ -1,6 +1,7 @@
 package io.github.yu1sh.reality.economy;
 
-import java.util.Set;
+import java.util.ArrayList;
+import java.util.List;
 import net.minecraft.core.registries.BuiltInRegistries;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.item.Item;
@@ -8,7 +9,7 @@ import net.minecraft.world.item.ItemStack;
 
 /** Server-only allowlist for ordinary, tag-free vanilla shop items. */
 final class ItemPolicy {
-    private static final Set<String> SAFE_VANILLA_ITEMS = Set.of(
+    private static final List<String> SAFE_VANILLA_ITEMS = List.of(
             "minecraft:apple",
             "minecraft:baked_potato",
             "minecraft:beetroot",
@@ -88,6 +89,20 @@ final class ItemPolicy {
             return null;
         }
         return item;
+    }
+
+    /**
+     * Returns the fixed-order subset of the existing allowlist that currently
+     * resolves to a clean, stackable vanilla item in the server registry.
+     */
+    static List<String> pickerItemIds() {
+        List<String> resolved = new ArrayList<>();
+        for (String itemId : SAFE_VANILLA_ITEMS) {
+            if (resolve(itemId) != null) {
+                resolved.add(itemId);
+            }
+        }
+        return List.copyOf(resolved);
     }
 
     static boolean validQuantity(Item item, int quantity) {

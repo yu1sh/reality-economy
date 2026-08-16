@@ -128,6 +128,21 @@ recovery decisions; all state-changing Shop GUI actions are explicit validated
 server requests. The Economy GUI above is separate from the Shop GUI and does
 not change Shop contracts or ledger semantics.
 
+An appointed clerk receives an additional server-produced item picker in the
+add/change form. Its candidates are generated in fixed order from the existing
+allowlisted, tag-free vanilla item policy, returned in bounded pages, and are
+the only values the picker writes into the existing item field. Ordinary
+players, administrators who are not clerks, and permission-mismatched views
+receive no picker candidates. The final add/change request still rechecks the
+actor, menu, protocol, world epoch, catalog revision, item policy, quantity,
+price, request identity, audit, and persistence path. The picker supports
+keyboard page navigation, item selection, and back navigation, with English and
+Japanese translations.
+
+The Shop GUI wire contract is protocol version `3`; the additive picker fields
+are consumed atomically by this child’s server and client, and older version-2
+Shop GUI clients are rejected by the channel handshake.
+
 ## Recovery and reset
 
 Shop purchase journals survive a restart. Unresolved `PENDING` or
