@@ -86,6 +86,15 @@ public final class QuestRewardReceiver {
                 return existingResult;
             }
 
+            if (isOldEpoch(ledger, intent)) {
+                return freeze(
+                        level,
+                        ledger,
+                        key,
+                        intent,
+                        "reward frozen after server world epoch reset");
+            }
+
             QuestRewardContract.WorldScope expectedScope = new QuestRewardContract.WorldScope(
                     ledger.worldKey(),
                     ledger.currentEpoch());
@@ -138,7 +147,7 @@ public final class QuestRewardReceiver {
         }
     }
 
-    /** Reconciles prepared rewards for the current world epoch after a restart. */
+    /** Reconciles current rewards and durably freezes stale ones after restart. */
     static void recover(ServerLevel level) {
         if (level == null) {
             return;
@@ -146,9 +155,18 @@ public final class QuestRewardReceiver {
         EconomyLedger ledger = ledgerFor(level);
         synchronized (ledger) {
             List<QuestRewardContract.JournalRecord> pending = ledger.pendingQuestRewards();
+            boolean rejectedDuringRecovery = false;
             for (QuestRewardContract.JournalRecord record : pending) {
                 QuestRewardContract.Key key = keyOf(record.intent());
                 if (key == null || !isCurrentScope(ledger, record.intent())) {
+                    if (key != null) {
+                        freeze(
+                                level,
+                                ledger,
+                                key,
+                                record.intent(),
+                                "reward frozen after server world epoch reset");
+                    }
                     continue;
                 }
                 String validation = QuestRewardContract.validate(
@@ -156,12 +174,13 @@ public final class QuestRewardReceiver {
                         new QuestRewardContract.WorldScope(ledger.worldKey(), ledger.currentEpoch()));
                 if (!validation.isEmpty()) {
                     ledger.markQuestRewardRejected(key, validation);
+                    rejectedDuringRecovery = true;
                     continue;
                 }
                 applyPrepared(level, ledger, key);
             }
-            if (!pending.isEmpty()) {
-                persist(level, null, QuestRewardContract.ResultStatus.PENDING);
+            if (rejectedDuringRecovery) {
+                persist(level, null, QuestRewardContract.ResultStatus.REJECTED);
             }
         }
     }
@@ -190,14 +209,30 @@ public final class QuestRewardReceiver {
                     existing.balance(),
                     existing.transactionId(),
                     key);
-            case PENDING -> {
-                if (!isCurrentScope(ledger, existing.intent())) {
+            case FROZEN -> {
+                if (!persist(level, key, QuestRewardContract.ResultStatus.FROZEN)) {
                     yield result(
                             QuestRewardContract.ResultStatus.PENDING,
-                            "reward belongs to a frozen world epoch",
+                            "existing freeze record is not durably confirmed; retry is required",
                             existing.balance(),
                             null,
                             key);
+                }
+                yield result(
+                        QuestRewardContract.ResultStatus.FROZEN,
+                        existing.reason(),
+                        existing.balance(),
+                        null,
+                        key);
+            }
+            case PENDING -> {
+                if (!isCurrentScope(ledger, existing.intent())) {
+                    yield freeze(
+                            level,
+                            ledger,
+                            key,
+                            existing.intent(),
+                            "reward frozen after server world epoch reset");
                 }
                 yield applyPrepared(level, ledger, key);
             }
@@ -252,6 +287,79 @@ public final class QuestRewardReceiver {
     private static boolean isCurrentScope(EconomyLedger ledger, QuestRewardContract.Intent intent) {
         return ledger.worldKey().equals(intent.worldKey())
                 && ledger.currentEpoch().equals(intent.worldEpoch());
+    }
+
+    private static boolean isOldEpoch(
+            EconomyLedger ledger,
+            QuestRewardContract.Intent intent) {
+        if (intent == null
+                || ledger.currentEpoch().isBlank()
+                || !ledger.worldKey().equals(intent.worldKey())
+                || ledger.currentEpoch().equals(intent.worldEpoch())) {
+            return false;
+        }
+        return QuestRewardContract.validate(
+                        intent,
+                        new QuestRewardContract.WorldScope(
+                                intent.worldKey(),
+                                intent.worldEpoch()))
+                .isEmpty();
+    }
+
+    private static QuestRewardContract.Result freeze(
+            ServerLevel level,
+            EconomyLedger ledger,
+            QuestRewardContract.Key key,
+            QuestRewardContract.Intent intent,
+            String reason) {
+        QuestRewardContract.JournalRecord prior = ledger.findQuestReward(key);
+        if (prior != null && prior.status() != QuestRewardContract.JournalStatus.PENDING) {
+            if (prior.status() != QuestRewardContract.JournalStatus.FROZEN
+                    || !persist(level, key, QuestRewardContract.ResultStatus.FROZEN)) {
+                return result(
+                        QuestRewardContract.ResultStatus.PENDING,
+                        "existing freeze record is not durably confirmed; retry is required",
+                        prior.balance(),
+                        null,
+                        key);
+            }
+            return result(
+                    QuestRewardContract.ResultStatus.FROZEN,
+                    prior.reason(),
+                    prior.balance(),
+                    null,
+                    key);
+        }
+        QuestRewardContract.JournalRecord frozen = ledger.freezeQuestReward(key, intent, reason);
+        long balance = frozen == null
+                ? ledger.balanceOf(intent.targetPlayer())
+                : frozen.balance();
+        if (frozen == null) {
+            LOGGER.error("economy_quest_reward_freeze_failed key={}", key.canonical());
+            return result(
+                    QuestRewardContract.ResultStatus.PENDING,
+                    "reward freeze could not be prepared; retry is required",
+                    balance,
+                    null,
+                    key);
+        }
+        if (!persist(level, key, QuestRewardContract.ResultStatus.FROZEN)) {
+            ledger.rollbackQuestRewardFreeze(key, intent);
+            return result(
+                    QuestRewardContract.ResultStatus.PENDING,
+                    "reward freeze record is not durable; retry is required",
+                    balance,
+                    null,
+                    key);
+        }
+        audit(key, QuestRewardContract.ResultStatus.FROZEN, balance, frozen.reason());
+        reason = frozen.reason();
+        return result(
+                QuestRewardContract.ResultStatus.FROZEN,
+                reason,
+                balance,
+                null,
+                key);
     }
 
     private static QuestRewardContract.Key keyOf(QuestRewardContract.Intent intent) {

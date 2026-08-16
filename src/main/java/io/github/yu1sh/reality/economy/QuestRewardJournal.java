@@ -7,6 +7,7 @@ import net.minecraft.nbt.Tag;
 /** NBT codec for the durable P-05 reward journal and its conflict audit entries. */
 final class QuestRewardJournal {
     static final String REWARDS_TAG = "quest_reward_journal";
+    static final String FROZEN_REWARDS_TAG = "quest_reward_freezes";
     static final String CONFLICTS_TAG = "quest_reward_conflicts";
 
     static final String CONTRACT_MAJOR_TAG = "contract_major";
@@ -28,6 +29,8 @@ final class QuestRewardJournal {
     static final String BALANCE_TAG = "balance";
     static final String RECORDED_AT_TAG = "recorded_at";
     static final String REASON_TAG = "reason";
+    static final String FREEZE_ID_TAG = "freeze_id";
+    static final String FREEZE_TARGET_TAG = "freeze_target_player";
     static final String EXISTING_KEY_TAG = "existing_key";
 
     private QuestRewardJournal() {
@@ -96,6 +99,10 @@ final class QuestRewardJournal {
         tag.putLong(BALANCE_TAG, record.balance());
         tag.putLong(RECORDED_AT_TAG, record.recordedAt());
         tag.putString(REASON_TAG, record.reason());
+        if (record.status() == QuestRewardContract.JournalStatus.FROZEN) {
+            tag.putString(FREEZE_ID_TAG, record.intent().key().canonical());
+            tag.putString(FREEZE_TARGET_TAG, record.intent().targetPlayer().toString());
+        }
         return tag;
     }
 
@@ -123,6 +130,19 @@ final class QuestRewardJournal {
         long recordedAt = tag.getLong(RECORDED_AT_TAG);
         if (balance < 0L || recordedAt <= 0L) {
             return null;
+        }
+        if (status == QuestRewardContract.JournalStatus.FROZEN) {
+            String freezeId = readString(
+                    tag,
+                    FREEZE_ID_TAG,
+                    QuestRewardContract.MAX_REWARD_KEY_LENGTH);
+            String freezeTarget = readString(tag, FREEZE_TARGET_TAG, 64);
+            if (freezeId == null
+                    || !freezeId.equals(intent.key().canonical())
+                    || freezeTarget == null
+                    || !freezeTarget.equals(intent.targetPlayer().toString())) {
+                return null;
+            }
         }
         return new QuestRewardContract.JournalRecord(
                 intent,

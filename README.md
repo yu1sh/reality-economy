@@ -162,6 +162,34 @@ debit.
 economy ledger, and seeds a fresh catalog. Previous shop purchases and audit
 records remain in retained epochs, and the previous ledger data is archived.
 
+Quest reward intake is the server-to-server P-05/P-07 endpoint version 2:
+`quest_reward_scope_v2` and `quest_reward_receive_v2`. The stable reward-key
+major remains `1`, preserving existing key identity and readable persisted v1
+journals; v1 endpoints are not accepted by the v2 producer/receiver and the two
+child repositories must be upgraded atomically. At reset, every unresolved
+quest reward journal in the old epoch is moved to the durable global freeze
+namespace with status `FROZEN`. A late old-epoch notification follows the same
+freeze path rather than becoming a current-epoch `REJECTED`; until the freeze
+record is durable, the response remains retryable `PENDING`. The freeze record persists
+the immutable intent (including world epoch and target player), the canonical
+reward key, the reason, and the recorded time. Duplicate notifications return
+the same `FROZEN` result and cannot credit the ledger; current-epoch `PENDING`,
+`APPLIED`, `REJECTED`, and `CONFLICT` semantics are unchanged.
+
+In this boundary, P-07's `world_key` is a stable per-world scope identifier and
+`world_epoch` is the reset identifier. Neither is a Minecraft dimension key;
+P-08 receives a separate P-05-generated `dimension_key` and validates it
+against the executing level and actor. P-07 owns scope currentness and
+durable reward journaling, while P-08 owns actor/dimension binding and
+inventory revision/mutation.
+
+P-07 returns terminal `FROZEN` only after the FROZEN journal record has been
+successfully persisted. A freeze preparation or persistence failure returns
+retryable `PENDING`, restores the pending journal when necessary, and cannot
+be interpreted by P-05 as a successful terminal freeze. The P-05 and P-07 v2
+endpoint pair must be published together; v1 endpoints are a breaking,
+unsupported boundary.
+
 ## v1 boundary
 
 Player-to-player transfers and NPC integration are not implemented in this

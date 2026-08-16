@@ -29,6 +29,8 @@ public final class EconomyLedger extends SavedData {
     private final Map<UUID, Long> balances = new HashMap<>();
     private final Map<UUID, DebitRecord> shopDebits = new HashMap<>();
     private final Map<String, QuestRewardContract.JournalRecord> questRewards = new HashMap<>();
+    /** Freeze records are retained outside the active epoch namespace. */
+    private final Map<String, QuestRewardContract.JournalRecord> frozenQuestRewards = new HashMap<>();
     private final List<QuestRewardContract.ConflictRecord> questRewardConflicts = new ArrayList<>();
     private final Map<String, LedgerArchive> archivedEpochs = new HashMap<>();
     private String worldKey = "";
@@ -54,6 +56,7 @@ public final class EconomyLedger extends SavedData {
         readBalances(tag, ledger.balances);
         readDebits(tag, ledger.shopDebits);
         readQuestRewards(tag, ledger.questRewards);
+        readQuestRewards(tag, QuestRewardJournal.FROZEN_REWARDS_TAG, ledger.frozenQuestRewards);
         readQuestRewardConflicts(tag, ledger.questRewardConflicts);
 
         ListTag archiveTags = tag.getList(ARCHIVED_EPOCHS_TAG, Tag.TAG_COMPOUND);
@@ -179,7 +182,7 @@ public final class EconomyLedger extends SavedData {
                 return archived;
             }
         }
-        return null;
+        return frozenQuestRewards.get(key.canonical());
     }
 
     synchronized void prepareQuestReward(QuestRewardContract.JournalRecord record) {
@@ -190,6 +193,71 @@ public final class EconomyLedger extends SavedData {
     synchronized void rejectQuestReward(QuestRewardContract.JournalRecord record) {
         questRewards.put(record.intent().key().canonical(), record);
         setDirty();
+    }
+
+    /**
+     * Moves a reward into a durable, non-crediting freeze namespace. Existing
+     * terminal records are preserved; a duplicate freeze request returns the
+     * same record and never creates a second credit opportunity.
+     */
+    synchronized QuestRewardContract.JournalRecord freezeQuestReward(
+            QuestRewardContract.Key key,
+            QuestRewardContract.Intent incoming,
+            String reason) {
+        if (key == null
+                || reason == null
+                || reason.isBlank()
+                || reason.length() > 256) {
+            return null;
+        }
+
+        QuestRewardContract.JournalRecord existing = findQuestReward(key);
+        if (existing != null) {
+            if (existing.status() != QuestRewardContract.JournalStatus.PENDING) {
+                return existing;
+            }
+        }
+
+        QuestRewardContract.Intent intent = existing == null ? incoming : existing.intent();
+        if (intent == null
+                || intent.key() == null
+                || !key.canonical().equals(intent.key().canonical())) {
+            return null;
+        }
+
+        removeQuestReward(key.canonical());
+        QuestRewardContract.JournalRecord frozen = new QuestRewardContract.JournalRecord(
+                intent,
+                QuestRewardContract.JournalStatus.FROZEN,
+                null,
+                existing == null ? balanceOf(intent.targetPlayer()) : existing.balance(),
+                System.currentTimeMillis(),
+                reason);
+        frozenQuestRewards.put(key.canonical(), frozen);
+        setDirty();
+        return frozen;
+    }
+
+    /** Restores a retryable pending journal after a freeze save failure. */
+    synchronized void rollbackQuestRewardFreeze(
+            QuestRewardContract.Key key,
+            QuestRewardContract.Intent intent) {
+        if (key == null || intent == null) {
+            return;
+        }
+        QuestRewardContract.JournalRecord frozen = frozenQuestRewards.remove(key.canonical());
+        if (frozen != null) {
+            questRewards.put(
+                    key.canonical(),
+                    new QuestRewardContract.JournalRecord(
+                            intent,
+                            QuestRewardContract.JournalStatus.PENDING,
+                            null,
+                            frozen.balance(),
+                            System.currentTimeMillis(),
+                            "freeze record persistence failed; retry is required"));
+            setDirty();
+        }
     }
 
     synchronized void markQuestRewardRejected(QuestRewardContract.Key key, String reason) {
@@ -272,6 +340,7 @@ public final class EconomyLedger extends SavedData {
         if (epoch == null || epoch.isBlank() || epoch.equals(currentEpoch)) {
             return;
         }
+        freezePendingQuestRewards();
         if (!currentEpoch.isBlank()) {
             archivedEpochs.put(
                     currentEpoch,
@@ -289,6 +358,28 @@ public final class EconomyLedger extends SavedData {
         setDirty();
     }
 
+    private void freezePendingQuestRewards() {
+        List<QuestRewardContract.JournalRecord> pending = new ArrayList<>();
+        for (QuestRewardContract.JournalRecord record : questRewards.values()) {
+            if (record.status() == QuestRewardContract.JournalStatus.PENDING) {
+                pending.add(record);
+            }
+        }
+        for (QuestRewardContract.JournalRecord record : pending) {
+            freezeQuestReward(
+                    record.intent().key(),
+                    record.intent(),
+                    "reward frozen after server world epoch reset");
+        }
+    }
+
+    private void removeQuestReward(String canonicalKey) {
+        questRewards.remove(canonicalKey);
+        for (LedgerArchive archive : archivedEpochs.values()) {
+            archive.rewards().remove(canonicalKey);
+        }
+    }
+
     private void putBalance(UUID player, long balance) {
         if (balance == 0) {
             balances.remove(player);
@@ -304,6 +395,7 @@ public final class EconomyLedger extends SavedData {
         writeBalances(tag, balances);
         writeDebits(tag, shopDebits);
         writeQuestRewards(tag, questRewards.values());
+        writeQuestRewards(tag, QuestRewardJournal.FROZEN_REWARDS_TAG, frozenQuestRewards.values());
         writeQuestRewardConflicts(tag, questRewardConflicts);
 
         ListTag archiveTags = new ListTag();
@@ -367,7 +459,14 @@ public final class EconomyLedger extends SavedData {
     private static void readQuestRewards(
             CompoundTag tag,
             Map<String, QuestRewardContract.JournalRecord> destination) {
-        ListTag rewardTags = tag.getList(QuestRewardJournal.REWARDS_TAG, Tag.TAG_COMPOUND);
+        readQuestRewards(tag, QuestRewardJournal.REWARDS_TAG, destination);
+    }
+
+    private static void readQuestRewards(
+            CompoundTag tag,
+            String listKey,
+            Map<String, QuestRewardContract.JournalRecord> destination) {
+        ListTag rewardTags = tag.getList(listKey, Tag.TAG_COMPOUND);
         for (int index = 0; index < rewardTags.size(); index++) {
             QuestRewardContract.JournalRecord record = QuestRewardJournal.readRecord(
                     rewardTags.getCompound(index));
@@ -420,13 +519,20 @@ public final class EconomyLedger extends SavedData {
     private static void writeQuestRewards(
             CompoundTag tag,
             java.util.Collection<QuestRewardContract.JournalRecord> source) {
+        writeQuestRewards(tag, QuestRewardJournal.REWARDS_TAG, source);
+    }
+
+    private static void writeQuestRewards(
+            CompoundTag tag,
+            String listKey,
+            java.util.Collection<QuestRewardContract.JournalRecord> source) {
         ListTag rewardTags = new ListTag();
         List<QuestRewardContract.JournalRecord> records = new ArrayList<>(source);
         records.sort(Comparator.comparing(record -> record.intent().key().canonical()));
         for (QuestRewardContract.JournalRecord record : records) {
             rewardTags.add(QuestRewardJournal.writeRecord(record));
         }
-        tag.put(QuestRewardJournal.REWARDS_TAG, rewardTags);
+        tag.put(listKey, rewardTags);
     }
 
     private static void writeQuestRewardConflicts(

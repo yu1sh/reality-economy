@@ -12,8 +12,14 @@ public final class QuestRewardContract {
     public static final String SOURCE = "P-05-QUESTS";
     public static final String CURRENCY_UNIT = "reality_economy";
     public static final String PRODUCER_MOD_ID = "reality_quests";
-    public static final String IMC_RECEIVE_METHOD = "quest_reward_receive_v1";
-    public static final String IMC_SCOPE_METHOD = "quest_reward_scope_v1";
+    /**
+     * The IMC endpoint version is independent from the stable reward-key
+     * contract major. Version 2 adds the terminal FROZEN result and must be
+     * negotiated atomically by the producer and receiver.
+     */
+    public static final int REWARD_ENDPOINT_VERSION = 2;
+    public static final String IMC_RECEIVE_METHOD = "quest_reward_receive_v2";
+    public static final String IMC_SCOPE_METHOD = "quest_reward_scope_v2";
     public static final long MIN_REWARD_AMOUNT = 1L;
     public static final long MAX_REWARD_AMOUNT = 100_000L;
 
@@ -24,6 +30,7 @@ public final class QuestRewardContract {
     static final int MAX_QUEST_ID_LENGTH = 64;
     static final int MAX_COMPLETION_ID_LENGTH = 128;
     static final int MAX_DIMENSION_LENGTH = 128;
+    static final int MAX_REWARD_KEY_LENGTH = 768;
     private static final char KEY_SEPARATOR = '\u001f';
 
     private QuestRewardContract() {
@@ -34,14 +41,16 @@ public final class QuestRewardContract {
         ALREADY_APPLIED,
         PENDING,
         REJECTED,
-        CONFLICT
+        CONFLICT,
+        FROZEN
     }
 
     enum JournalStatus {
         PENDING,
         APPLIED,
         REJECTED,
-        CONFLICT
+        CONFLICT,
+        FROZEN
     }
 
     public record WorldScope(String worldKey, String worldEpoch) {
