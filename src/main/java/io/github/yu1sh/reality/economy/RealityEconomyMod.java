@@ -16,6 +16,7 @@ import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.nbt.CompoundTag;
 import net.minecraft.network.chat.Component;
 import net.minecraft.resources.ResourceLocation;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.player.Inventory;
@@ -23,6 +24,9 @@ import net.minecraft.world.inventory.MenuType;
 import net.minecraftforge.common.MinecraftForge;
 import net.minecraftforge.event.RegisterCommandsEvent;
 import net.minecraftforge.event.level.LevelEvent;
+import net.minecraftforge.event.server.ServerStartedEvent;
+import net.minecraftforge.event.server.ServerStoppedEvent;
+import net.minecraftforge.event.server.ServerStartingEvent;
 import net.minecraftforge.eventbus.api.SubscribeEvent;
 import net.minecraftforge.common.extensions.IForgeMenuType;
 import net.minecraftforge.fml.InterModComms;
@@ -56,13 +60,36 @@ public final class RealityEconomyMod {
                 QuestRewardContract.PRODUCER_MOD_ID,
                 QuestRewardContract.IMC_SCOPE_METHOD,
                 () -> (Function<ServerLevel, CompoundTag>) QuestRewardReceiver::currentScope);
+        InterModComms.sendTo(
+                QuestRewardContract.FOUNDATION_MOD_ID,
+                QuestRewardContract.FOUNDATION_HEALTH_METHOD,
+                () -> (Function<MinecraftServer, CompoundTag>) QuestRewardReceiver::foundationHealth);
+    }
+
+    @SubscribeEvent
+    public void onServerStarting(ServerStartingEvent event) {
+        QuestRewardReceiver.onServerStarting(event.getServer());
+    }
+
+    @SubscribeEvent
+    public void onServerStarted(ServerStartedEvent event) {
+        QuestRewardReceiver.onServerStarted(event.getServer());
+    }
+
+    @SubscribeEvent
+    public void onServerStopped(ServerStoppedEvent event) {
+        QuestRewardReceiver.onServerStopped();
     }
 
     @SubscribeEvent
     public void recoverQuestRewards(LevelEvent.Load event) {
         if (event.getLevel() instanceof ServerLevel level
                 && Level.OVERWORLD.equals(level.dimension())) {
-            QuestRewardReceiver.recover(level);
+            try {
+                QuestRewardReceiver.recover(level);
+            } catch (RuntimeException failure) {
+                QuestRewardReceiver.markInitializationFailed();
+            }
         }
     }
 

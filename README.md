@@ -190,6 +190,21 @@ be interpreted by P-05 as a successful terminal freeze. The P-05 and P-07 v2
 endpoint pair must be published together; v1 endpoints are a breaking,
 unsupported boundary.
 
+## Foundation runtime status boundary
+
+P-07 sends one server-only `foundation_health_v1` Forge IMC report (report
+version `1`) to `reality_foundation`. P-07 owns the provider report and marks
+`quest_reward_scope_v2` and `quest_reward_receive_v2` as version `2`, together
+with its server lifecycle readiness. Foundation registers only a redacted
+health projection; it does not read or own the economy ledger, reward journal,
+world scope, balances, or FROZEN records.
+
+If the report is absent, duplicated, malformed, incompatible, or its recovery
+initialization fails, Foundation marks only the P-07 integration projection
+`UNAVAILABLE` or `DEGRADED` and continues the other service lifecycles. The
+report is not sent to clients directly and contains no player, balance,
+reward, operation, exception, Git SHA, or repository information.
+
 ## v1 boundary
 
 Player-to-player transfers and NPC integration are not implemented in this

@@ -2,6 +2,8 @@ package io.github.yu1sh.reality.economy;
 
 import java.util.List;
 import net.minecraft.nbt.CompoundTag;
+import net.minecraft.nbt.ListTag;
+import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -14,8 +16,70 @@ import org.slf4j.LoggerFactory;
  */
 public final class QuestRewardReceiver {
     private static final Logger LOGGER = LoggerFactory.getLogger(RealityEconomyMod.MOD_ID);
+    private static volatile RuntimeState runtimeState = RuntimeState.NOT_STARTED;
+    private static volatile boolean recoveryFailed;
+
+    private enum RuntimeState {
+        NOT_STARTED("not_started"),
+        INITIALIZING("initializing"),
+        READY("ready"),
+        INITIALIZATION_FAILED("initialization_failed");
+
+        private final String wireValue;
+
+        RuntimeState(String wireValue) {
+            this.wireValue = wireValue;
+        }
+    }
 
     private QuestRewardReceiver() {
+    }
+
+    static void onServerStarting(MinecraftServer server) {
+        runtimeState = server == null
+                ? RuntimeState.INITIALIZATION_FAILED
+                : RuntimeState.INITIALIZING;
+    }
+
+    static void onServerStarted(MinecraftServer server) {
+        runtimeState = server != null && !recoveryFailed
+                ? RuntimeState.READY
+                : RuntimeState.INITIALIZATION_FAILED;
+    }
+
+    static void markInitializationFailed() {
+        recoveryFailed = true;
+        runtimeState = RuntimeState.INITIALIZATION_FAILED;
+        LOGGER.error("economy_reward_runtime_initialization_failed");
+    }
+
+    static void onServerStopped() {
+        recoveryFailed = false;
+        runtimeState = RuntimeState.NOT_STARTED;
+    }
+
+    static CompoundTag foundationHealth(MinecraftServer server) {
+        CompoundTag report = new CompoundTag();
+        report.putInt("report_version", QuestRewardContract.FOUNDATION_HEALTH_REPORT_VERSION);
+        report.putString("service_id", QuestRewardContract.FOUNDATION_SERVICE_ID);
+        report.putString("kind", "provider");
+        report.putString("runtime_state", runtimeState.wireValue);
+        report.putString("registration_issue", "none");
+        ListTag endpoints = new ListTag();
+        addEndpoint(endpoints, QuestRewardContract.IMC_SCOPE_METHOD,
+                QuestRewardContract.REWARD_ENDPOINT_VERSION);
+        addEndpoint(endpoints, QuestRewardContract.IMC_RECEIVE_METHOD,
+                QuestRewardContract.REWARD_ENDPOINT_VERSION);
+        report.put("endpoints", endpoints);
+        return report;
+    }
+
+    private static void addEndpoint(ListTag endpoints, String method, int version) {
+        CompoundTag endpoint = new CompoundTag();
+        endpoint.putString("method", method);
+        endpoint.putInt("version", version);
+        endpoint.putString("state", "available");
+        endpoints.add(endpoint);
     }
 
     /**

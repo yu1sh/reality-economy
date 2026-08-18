@@ -20,6 +20,10 @@ public final class QuestRewardContract {
     public static final int REWARD_ENDPOINT_VERSION = 2;
     public static final String IMC_RECEIVE_METHOD = "quest_reward_receive_v2";
     public static final String IMC_SCOPE_METHOD = "quest_reward_scope_v2";
+    public static final String FOUNDATION_MOD_ID = "reality_foundation";
+    public static final String FOUNDATION_HEALTH_METHOD = "foundation_health_v1";
+    public static final int FOUNDATION_HEALTH_REPORT_VERSION = 1;
+    public static final String FOUNDATION_SERVICE_ID = "reality.economy";
     public static final long MIN_REWARD_AMOUNT = 1L;
     public static final long MAX_REWARD_AMOUNT = 100_000L;
 
